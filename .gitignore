@@ -1,0 +1,21 @@
+# Research Data Files (Large files)
+*.tif
+*.nc
+*.zarr/
+*.parquet
+*.joblib
+*.png
+*.pdf
+
+# Directories
+archive/
+DATA_process/
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store
+
+# PySR temporary files
+sr_*.csv
+pysr_*.csv
+hall_of_fame_*.csv
+julia_*.log
