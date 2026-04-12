@@ -34,14 +34,16 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────
 # 경로 및 상수
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR   = "/mnt/e/dataset/XCO2연구 데이터"
-PARQUET_IN = os.path.join(BASE_DIR, "anomaly_output/super_obs_dataset.parquet")
+BASE_DIR   = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
+PARQUET_IN = os.path.join(BASE_DIR, "anomaly_output/anom_1d.parquet")
 OUT_DIR    = os.path.join(BASE_DIR, "anomaly_output")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-FIG1_PATH    = os.path.join(OUT_DIR, "Figure_1_Final.png")
-SPLIT_PATH   = os.path.join(OUT_DIR, "split_indices_v2.json")
-SCALER_PATH  = os.path.join(OUT_DIR, "scalers_v2.joblib")
+FIG1_PATH         = os.path.join(OUT_DIR, "Figure_1_Final.png")
+SPLIT_PATH        = os.path.join(OUT_DIR, "split_indices_v2.json")
+SCALER_PATH       = os.path.join(OUT_DIR, "scalers_v2.joblib")
+PARQUET_OCO3_ANOM = os.path.join(OUT_DIR, "oco3_anom_1d.parquet")
+OCO3_VAL_PATH     = os.path.join(OUT_DIR, "oco3_validation_scaled.parquet")
 
 # 격자 설정
 LAT_MIN, LAT_MAX = 20.0, 50.0
@@ -136,7 +138,7 @@ def compute_spatial_correlation(df: pd.DataFrame) -> tuple:
         if n < MIN_OBS_CORR:
             continue
 
-        xco2_vals = grp["xco2"].values
+        xco2_vals = grp["xco2_anomaly"].values
         no2_vals  = grp["tropomi_no2"].values
 
         # NaN 체크
@@ -179,46 +181,52 @@ def compute_spatial_correlation(df: pd.DataFrame) -> tuple:
 # STEP 3: Figure 1 렌더링 — Correlation Map + Observation Density
 # ═════════════════════════════════════════════════════════════════
 def plot_figure_1(r_map, n_map, sig_map) -> None:
-    """상관 계수 맵과 관측 밀도 맵을 병기한 Figure 1 생성."""
+    """상관 계수 맵 / 관측 밀도 맵 / N≥100 필터 맵 3-panel Figure 1 생성.
+
+    (a) 전체 r 맵 (BH-Y FDR 보정, 비유의 격자 회색 점 표시)
+    (b) 관측 밀도 맵 (log scale) — 궤도 sampling bias 시각화
+    (c) N≥100 필터 적용 r 맵 — sampling 편향 제거 후 geographically coherent 클러스터 확인
+    """
     print("\n" + "=" * 70)
-    print("STEP 3: Figure 1 렌더링 (Correlation + Density)")
+    print("STEP 3: Figure 1 렌더링 (3-panel: Correlation / Density / N≥100 Filtered)")
     print("=" * 70)
 
+    # N≥100 필터 적용 r 맵 (궤도 아티팩트 제거 버전)
+    N_THRESH = 100
+    r_filtered = np.where(n_map >= N_THRESH, r_map, np.nan)
+    n_filtered_grids = np.isfinite(r_filtered).sum()
+    print(f"  N ≥ {N_THRESH} 격자 수 (c패널 표시 대상): {n_filtered_grids:,}")
+
     if HAS_CARTOPY:
-        fig = plt.figure(figsize=(18, 7))
-        gs = GridSpec(1, 3, width_ratios=[1, 1, 0.05], wspace=0.15)
+        fig = plt.figure(figsize=(24, 7))
+        gs = GridSpec(1, 4, width_ratios=[1, 1, 1, 0.05], wspace=0.18)
 
         proj = ccrs.PlateCarree()
         ax1 = fig.add_subplot(gs[0], projection=proj)
         ax2 = fig.add_subplot(gs[1], projection=proj)
-        cax = fig.add_subplot(gs[2])
+        ax3 = fig.add_subplot(gs[2], projection=proj)
+        cax = fig.add_subplot(gs[3])
 
-        for ax in [ax1, ax2]:
+        for ax in [ax1, ax2, ax3]:
             ax.set_extent([LON_MIN, LON_MAX, LAT_MIN, LAT_MAX], crs=proj)
             ax.add_feature(cfeature.COASTLINE, linewidth=0.8)
             ax.add_feature(cfeature.BORDERS, linewidth=0.5, linestyle="--")
             ax.gridlines(draw_labels=True, linewidth=0.3, alpha=0.5)
     else:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
+        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(24, 7))
         cax = None
 
-    # ── (a) Correlation Map ──
-    r_masked = np.ma.masked_invalid(r_map)
+    r_kw = dict(cmap="RdBu_r", vmin=-0.8, vmax=0.8, shading="flat",
+                transform=ccrs.PlateCarree() if HAS_CARTOPY else None)
 
-    # 유의하지 않은 격자에 해칭(반투명 마스크)
+    # ── (a) 전체 Correlation Map ──
+    r_masked = np.ma.masked_invalid(r_map)
     nonsig_mask = ~sig_map & np.isfinite(r_map)
 
-    im1 = ax1.pcolormesh(
-        lon_edges, lat_edges, r_masked,
-        cmap="RdBu_r", vmin=-0.8, vmax=0.8,
-        shading="flat",
-        transform=ccrs.PlateCarree() if HAS_CARTOPY else None
-    )
+    im1 = ax1.pcolormesh(lon_edges, lat_edges, r_masked, **r_kw)
 
-    # 비유의 격자에 X 마크 오버레이 (sparse sampling)
     if nonsig_mask.any():
         ns_lats, ns_lons = np.where(nonsig_mask)
-        # 너무 많을 수 있으므로 최대 2000개만 표시
         sample_n = min(len(ns_lats), 2000)
         if sample_n < len(ns_lats):
             idx = np.random.choice(len(ns_lats), sample_n, replace=False)
@@ -229,13 +237,9 @@ def plot_figure_1(r_map, n_map, sig_map) -> None:
             transform=ccrs.PlateCarree() if HAS_CARTOPY else None
         )
 
-    ax1.set_title("(a) Pearson r (NO₂ vs XCO₂)\nBH-Y FDR corrected, α=0.05",
-                   fontsize=12, fontweight="bold")
-
-    if cax:
-        plt.colorbar(im1, cax=cax, label="Pearson r", extend="both")
-    else:
-        plt.colorbar(im1, ax=ax1, shrink=0.8, label="Pearson r", extend="both")
+    ax1.set_title("(a) Pearson r — All grids\nBH-Y FDR corrected, α=0.05",
+                  fontsize=11, fontweight="bold")
+    plt.colorbar(im1, ax=ax1, shrink=0.8, label="Pearson r", extend="both")
 
     # ── (b) Observation Density Map ──
     n_masked = np.ma.masked_where(n_map == 0, n_map)
@@ -246,13 +250,24 @@ def plot_figure_1(r_map, n_map, sig_map) -> None:
         shading="flat",
         transform=ccrs.PlateCarree() if HAS_CARTOPY else None
     )
-    ax2.set_title("(b) Observation Density (N per Grid Cell)",
-                   fontsize=12, fontweight="bold")
+    ax2.set_title("(b) Observation Density (N per grid)\nOCO-2 궤도 sampling geometry 반영",
+                  fontsize=11, fontweight="bold")
     plt.colorbar(im2, ax=ax2, shrink=0.8, label="N (log scale)")
 
-    fig.suptitle("Figure 1. Spatial Correlation between TROPOMI NO₂ and OCO-2 XCO₂\n"
+    # ── (c) N≥100 필터 적용 r 맵 ──
+    r_filt_masked = np.ma.masked_invalid(r_filtered)
+    im3 = ax3.pcolormesh(lon_edges, lat_edges, r_filt_masked, **r_kw)
+    ax3.set_title(f"(c) Pearson r — N ≥ {N_THRESH} grids only\n궤도 편향 제거 후 geographically coherent 클러스터",
+                  fontsize=11, fontweight="bold")
+
+    if cax:
+        plt.colorbar(im3, cax=cax, label="Pearson r", extend="both")
+    else:
+        plt.colorbar(im3, ax=ax3, shrink=0.8, label="Pearson r", extend="both")
+
+    fig.suptitle("Figure 1. Spatial Correlation between TROPOMI NO₂ and OCO-2 XCO₂ Anomaly\n"
                  "East Asia, 2020–2024, 0.1° × 0.1° Super-observations",
-                 fontsize=14, fontweight="bold", y=1.02)
+                 fontsize=13, fontweight="bold", y=1.02)
 
     plt.tight_layout()
     fig.savefig(FIG1_PATH, dpi=300, bbox_inches="tight", facecolor="white")
@@ -369,11 +384,15 @@ def fit_scalers(df: pd.DataFrame, split_dict: dict) -> None:
 
     from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
-    feature_cols = [
+    candidate_cols = [
         "tropomi_no2", "era5_wind_speed", "era5_blh",
         "era5_u10", "era5_v10",
         "population_density", "odiac_emission"
     ]
+    feature_cols = [c for c in candidate_cols if c in df.columns]
+    missing = set(candidate_cols) - set(feature_cols)
+    if missing:
+        print(f"  ⚠️ 누락 feature (스케일링 제외): {missing}")
 
     # Train 분리
     train_mask = df["split"] == "train"
@@ -405,6 +424,7 @@ def fit_scalers(df: pd.DataFrame, split_dict: dict) -> None:
     }
     joblib.dump(bundle, SCALER_PATH)
     print(f"\n  Scaler Bundle 저장: {SCALER_PATH}")
+    return bundle
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -452,6 +472,67 @@ def print_summary(r_map, sig_map):
 
 
 # ═════════════════════════════════════════════════════════════════
+# STEP 6.5: OCO-3 독립 검증 세트 스케일링 & 저장
+# ═════════════════════════════════════════════════════════════════
+def export_oco3_validation(scaler_bundle: dict) -> None:
+    """OCO-3 anomaly에 OCO-2 Scaler를 적용하여 독립 검증 parquet 생성.
+
+    OCO-3는 학습·검증 데이터와 완전히 분리된 cross-satellite 독립 검증에 사용.
+    OCO-2 Train 세트로 fit된 Scaler를 그대로 transform만 수행하여 스케일 일관성 보장.
+    """
+    print("\n" + "=" * 70)
+    print("STEP 6.5: OCO-3 독립 검증 세트 스케일링 (Cross-satellite Validation)")
+    print("=" * 70)
+
+    if not os.path.exists(PARQUET_OCO3_ANOM):
+        print(f"  ⚠️ OCO-3 Anomaly 파일 없음 ({PARQUET_OCO3_ANOM}) — 건너뜀")
+        print("  → 02 스크립트를 먼저 실행하세요.")
+        return
+
+    df3 = pd.read_parquet(PARQUET_OCO3_ANOM)
+    df3["date"] = pd.to_datetime(df3["date"])
+    print(f"  [Load] OCO-3 Anomaly: {len(df3):,} 행, "
+          f"{df3['date'].min().date()} ~ {df3['date'].max().date()}")
+
+    feature_cols = scaler_bundle["feature_columns"]
+    available    = [c for c in feature_cols if c in df3.columns]
+    missing      = set(feature_cols) - set(available)
+    if missing:
+        print(f"  ⚠️ OCO-3에 없는 feature (NaN 대체): {missing}")
+        for col in missing:
+            df3[col] = np.nan
+
+    X_oco3 = df3[feature_cols].values.astype(np.float64)
+
+    # Exp A: StandardScaler transform (학습 없이 OCO-2 통계 그대로 적용)
+    scaler_a = scaler_bundle["exp_a_standard_scaler"]
+    X_a = scaler_a.transform(X_oco3)
+    df3_a = df3.copy()
+    for i, col in enumerate(feature_cols):
+        df3_a[f"{col}_scaled_a"] = X_a[:, i]
+
+    # Exp B: MinMaxScaler transform
+    scaler_b = scaler_bundle["exp_b_minmax_scaler"]
+    X_b = scaler_b.transform(X_oco3)
+    for i, col in enumerate(feature_cols):
+        df3_a[f"{col}_scaled_b"] = X_b[:, i]
+
+    df3_a["split"] = "oco3_independent"
+    df3_a.to_parquet(OCO3_VAL_PATH, index=False)
+    print(f"  [저장] OCO-3 독립 검증 세트: {OCO3_VAL_PATH}")
+    print(f"  Shape: {df3_a.shape}")
+
+    # 기간·격자 수 요약
+    n_grids = df3_a.groupby(["lat_idx", "lon_idx"]).ngroups
+    print(f"\n  [요약]")
+    print(f"    총 행수   : {len(df3_a):,}")
+    print(f"    고유 격자 : {n_grids:,}")
+    print(f"    Anomaly μ : {df3_a['xco2_anomaly'].mean():.4f} ppm")
+    print(f"    Anomaly σ : {df3_a['xco2_anomaly'].std():.4f} ppm")
+    print(f"  → OCO-2 학습 완료 후 이 파일로 cross-satellite 검증 수행")
+
+
+# ═════════════════════════════════════════════════════════════════
 # 메인 파이프라인
 # ═════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
@@ -468,14 +549,18 @@ if __name__ == "__main__":
     df, split_dict = temporal_split(df)
 
     # 5. Feature Scaling
-    fit_scalers(df, split_dict)
+    scaler_bundle = fit_scalers(df, split_dict)
 
-    # 6. Summary
+    # 6. OCO-3 독립 검증 세트
+    export_oco3_validation(scaler_bundle)
+
+    # 7. Summary
     print_summary(r_map, sig_map)
 
     print("\n" + "=" * 70)
     print("✅ 전체 파이프라인 완료!")
     print("=" * 70)
-    print(f"  📊 Figure 1     : {FIG1_PATH}")
-    print(f"  📂 Split Indices: {SPLIT_PATH}")
-    print(f"  ⚖️  Scalers      : {SCALER_PATH}")
+    print(f"  📊 Figure 1        : {FIG1_PATH}")
+    print(f"  📂 Split Indices   : {SPLIT_PATH}")
+    print(f"  ⚖️  Scalers         : {SCALER_PATH}")
+    print(f"  🛰️  OCO-3 Val Set   : {OCO3_VAL_PATH}")

@@ -14,11 +14,13 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────
 # 경로 설정
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR   = "/mnt/e/dataset/XCO2연구 데이터"
-PARQUET_IN = os.path.join(BASE_DIR, "anomaly_output/super_obs_dataset.parquet")
-OUT_DIR    = os.path.join(BASE_DIR, "anomaly_output")
-ZARR_OUT   = os.path.join(OUT_DIR, "refined_xco2_anom.zarr")
-FIG_OUT    = os.path.join(OUT_DIR, "anomaly_statistics.png")
+BASE_DIR         = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
+PARQUET_IN       = os.path.join(BASE_DIR, "anomaly_output/super_obs_dataset.parquet")
+PARQUET_OCO3_IN  = os.path.join(BASE_DIR, "anomaly_output/oco3_super_obs_dataset.parquet")
+OUT_DIR          = os.path.join(BASE_DIR, "anomaly_output")
+ZARR_OUT         = os.path.join(OUT_DIR, "refined_xco2_anom.zarr")
+FIG_OUT          = os.path.join(OUT_DIR, "anomaly_statistics.png")
+PARQUET_OCO3_ANOM_OUT = os.path.join(OUT_DIR, "oco3_anom_1d.parquet")
 
 # ─── 격자 설정 ───
 LAT_MIN, LAT_MAX = 20.0, 50.0
@@ -282,14 +284,96 @@ def export_to_zarr(df: pd.DataFrame, clim: xr.DataArray, delta: xr.DataArray):
     print(f"  [성공] Zarr Export 완료: {ZARR_OUT} (Size: {ds.nbytes / 1e6:.1f} MB)")
 
 
+def apply_oco2_climatology_to_oco3(clim: xr.DataArray, delta: xr.DataArray) -> None:
+    """OCO-2 기반 climatology/delta를 OCO-3 super-obs에 적용하여 anomaly 산출.
+
+    OCO-3는 독립 검증 세트로 사용되므로, OCO-2 파이프라인이 학습한
+    climatology를 그대로 적용합니다 (cross-satellite validation).
+    """
+    print("\n" + "=" * 60)
+    print("OCO-3 독립 검증: OCO-2 Climatology 적용")
+    print("=" * 60)
+
+    if not os.path.exists(PARQUET_OCO3_IN):
+        print(f"  ⚠️ OCO-3 super-obs 파일 없음 ({PARQUET_OCO3_IN}) — 건너뜀")
+        return
+
+    df3 = pd.read_parquet(PARQUET_OCO3_IN)
+    print(f"  [Load] OCO-3 Super-obs: {len(df3):,} 행")
+
+    df3['date'] = pd.to_datetime(df3['date'])
+    df3['year'] = df3['date'].dt.year
+    df3['month'] = df3['date'].dt.month
+    df3['year_month'] = df3['date'].dt.to_period('M')
+    df3['lat_band'] = (df3['latitude'] // 10) * 10
+    df3['lat_band_str'] = (df3['lat_band'].astype(int).astype(str) + "-" +
+                           (df3['lat_band'] + 10).astype(int).astype(str) + "°N")
+
+    # OCO-2 climatology/delta 적용 (동일 격자+월 매핑)
+    years = list(delta.coords["year"].values)
+    year_to_idx = {int(y): i for i, y in enumerate(years)}
+    clim_vals  = clim.values
+    delta_vals = delta.values
+
+    lat_i    = df3["lat_idx"].values
+    lon_i    = df3["lon_idx"].values
+    month_idx = df3["month"].values.astype(int) - 1
+    year_idx  = np.array([year_to_idx.get(int(y), -1) for y in df3["year"].values])
+
+    c_clim_arr = clim_vals[month_idx, lat_i, lon_i]
+
+    dc_arr = np.full(len(df3), np.nan, dtype=np.float32)
+    valid_year = year_idx >= 0
+    dc_arr[valid_year] = delta_vals[year_idx[valid_year], lat_i[valid_year], lon_i[valid_year]]
+
+    df3["xco2_baseline"] = c_clim_arr + dc_arr
+    df3["xco2_anomaly"]  = df3["xco2"].values - df3["xco2_baseline"].values
+
+    df3_valid = df3.dropna(subset=["xco2_anomaly"])
+    print(f"  [결과] OCO-3 유효 Anomaly: {len(df3_valid):,} / {len(df3):,} 행")
+
+    if len(df3_valid) > 0:
+        anom = df3_valid["xco2_anomaly"].values
+        from scipy import stats as _stats
+        kurt = _stats.kurtosis(anom, fisher=True)
+        print(f"  OCO-3 Anomaly 분포: μ={anom.mean():.4f}, σ={anom.std():.4f}, Kurt={kurt:.3f}")
+
+    save_cols = [c for c in [
+        'date', 'lat_idx', 'lon_idx', 'xco2', 'xco2_anomaly', 'xco2_baseline',
+        'tropomi_no2', 'year', 'month', 'year_month',
+        'latitude', 'longitude', 'lat_band', 'lat_band_str',
+        'era5_wind_speed', 'era5_blh', 'era5_u10', 'era5_v10',
+        'population_density', 'odiac_emission', 'n_soundings'
+    ] if c in df3_valid.columns]
+    df3_valid[save_cols].to_parquet(PARQUET_OCO3_ANOM_OUT, index=False)
+    print(f"  [저장] OCO-3 Anomaly 1D Parquet: {PARQUET_OCO3_ANOM_OUT}")
+    print(f"  Shape: {df3_valid[save_cols].shape}")
+
+
 if __name__ == "__main__":
     df_raw = load_and_prepare(PARQUET_IN)
     clim, valid_keys = compute_strict_climatology(df_raw)
     delta = compute_strict_yearly_deviation(df_raw, valid_keys)
     df_anom = calculate_anomaly_and_trend(df_raw, clim, delta)
     plot_qq_statistics(df_anom)
-    
+
     # 최종 결과물은 검증된 Anomaly에 한정하여 Zarr화
     export_to_zarr(df_anom, clim, delta)
-    
+
+    # 03 스크립트용 1D Anomaly Parquet 저장
+    anom_1d_path = os.path.join(OUT_DIR, "anom_1d.parquet")
+    save_cols = [c for c in [
+        'date', 'lat_idx', 'lon_idx', 'xco2', 'xco2_anomaly', 'xco2_baseline',
+        'tropomi_no2', 'year', 'month', 'year_month',
+        'latitude', 'longitude', 'lat_band', 'lat_band_str',
+        'era5_wind_speed', 'era5_blh', 'era5_u10', 'era5_v10',
+        'population_density', 'odiac_emission', 'n_soundings'
+    ] if c in df_anom.columns]
+    df_anom[save_cols].to_parquet(anom_1d_path, index=False)
+    print(f"\n  [저장] Anomaly 1D Parquet (03 스크립트 입력용): {anom_1d_path}")
+    print(f"  Shape: {df_anom[save_cols].shape}")
+
+    # OCO-3 독립 검증 세트 생성 (OCO-2 climatology 기반)
+    apply_oco2_climatology_to_oco3(clim, delta)
+
     print("\n✅ 모든 Anomaly 고도화 산출 및 평가 완료!")

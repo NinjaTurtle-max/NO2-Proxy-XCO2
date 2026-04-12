@@ -12,10 +12,11 @@ import cartopy.feature as cfeature
 # ─────────────────────────────────────────────────────────────────
 # 환경 및 경로 설정
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR = "/mnt/e/dataset/XCO2연구 데이터"
+BASE_DIR = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
 PARQUET_IN = os.path.join(BASE_DIR, "ml_ready_dataset.parquet")
 OUT_DIR = os.path.join(BASE_DIR, "anomaly_output")
-PARQUET_OUT = os.path.join(OUT_DIR, "super_obs_dataset.parquet")
+PARQUET_OUT     = os.path.join(OUT_DIR, "super_obs_dataset.parquet")
+PARQUET_OCO3_OUT = os.path.join(OUT_DIR, "oco3_super_obs_dataset.parquet")
 FIG_OUT = os.path.join(OUT_DIR, "n_map_super_ops.png")
 
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -106,6 +107,37 @@ def perform_super_observation(df: pd.DataFrame) -> pd.DataFrame:
     return out_df
 
 # ─────────────────────────────────────────────────────────────────
+# 위성 유형 판별 (OCO-2 vs OCO-3)
+# ─────────────────────────────────────────────────────────────────
+def detect_satellite(df: pd.DataFrame) -> pd.DataFrame:
+    """OCO-2 / OCO-3 판별 후 is_oco3 Boolean 컬럼 추가.
+
+    판별 우선순위:
+    1. 'satellite' 컬럼 존재 시 직접 사용 (가장 신뢰)
+    2. snd_operation_mode >= 3 휴리스틱
+       (OCO-3 전용 SAM 모드 = 3, Extended SAM = 4/5; OCO-2는 0·1·2만 사용)
+    3. 판별 불가 시 전체 OCO-2로 간주 (보수적 기본값)
+    """
+    if 'satellite' in df.columns:
+        sat_str = df['satellite'].astype(str).str.lower()
+        df['is_oco3'] = sat_str.str.contains(r'oco.?3', regex=True, na=False)
+        method = "'satellite' 컬럼 직접 판별"
+    elif 'snd_operation_mode' in df.columns:
+        oco3_modes = {3, 4, 5, '3', '4', '5'}
+        df['is_oco3'] = df['snd_operation_mode'].isin(oco3_modes)
+        method = "snd_operation_mode SAM 모드 휴리스틱 (>=3 → OCO-3)"
+    else:
+        df['is_oco3'] = False
+        method = "⚠️ 위성 식별 컬럼 없음 — 전체 OCO-2로 처리"
+
+    n_oco2 = int((~df['is_oco3']).sum())
+    n_oco3 = int(df['is_oco3'].sum())
+    print(f"  [Satellite 판별] 방법: {method}")
+    print(f"  OCO-2: {n_oco2:,} 행 | OCO-3: {n_oco3:,} 행")
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────
 # 메인 파이프라인
 # ─────────────────────────────────────────────────────────────────
 def run_super_observation():
@@ -161,7 +193,14 @@ def run_super_observation():
     # 강화된 B필터를 기본으로 모델링 수행
     df = df[mask_aod].copy()
     print("  ✅ [적용] 엄격한 광학 필터(조건 B)가 걸러낸 가장 신뢰도 높은 데이터를 집계에 사용합니다.")
-    
+
+    # 위성 유형 판별 및 분리
+    print("\n  [Satellite 분리]")
+    df = detect_satellite(df)
+    df_oco3 = df[df['is_oco3']].drop(columns=['is_oco3']).copy()
+    df      = df[~df['is_oco3']].drop(columns=['is_oco3']).copy()
+    print(f"  이후 파이프라인: OCO-2 {len(df):,} 행 사용 / OCO-3 {len(df_oco3):,} 행 별도 저장")
+
     # 2. 운영 모드 (Operation Mode) 및 육상/해양 비중 검토
     if 'snd_operation_mode' in df.columns and 'snd_land_water_indicator' in df.columns:
         print("\n  [운영 모드 및 Land Fraction 점검]")
@@ -244,6 +283,30 @@ def run_super_observation():
     print(f"  📍 파일 경로: {PARQUET_OUT}")
     print(f"  📦 용량: {mb_size:.1f} MB (극초소형 고효율 포맷)")
     print(f"  📊 최종 Shape: {agg_df.shape}")
+
+    # ── OCO-3 별도 집계 및 저장 ──────────────────────────────────
+    print("\n" + "=" * 60)
+    print("STEP 5: OCO-3 Super-observation (독립 검증용 별도 집계)")
+    print("=" * 60)
+
+    if len(df_oco3) == 0:
+        print("  ⚠️ OCO-3 데이터 없음 — 건너뜀 (위성 식별 컬럼 확인 필요)")
+    else:
+        agg_oco3 = perform_super_observation(df_oco3)
+        print(f"  [Result] OCO-3 Super-obs 완료: {len(agg_oco3):,} 행")
+
+        # OCO-3 결측 처리
+        drop_subset_oco3 = ['xco2']
+        if 'tropomi_no2' in agg_oco3.columns:
+            drop_subset_oco3.append('tropomi_no2')
+        agg_oco3 = agg_oco3.dropna(subset=drop_subset_oco3).reset_index(drop=True)
+
+        agg_oco3.to_parquet(PARQUET_OCO3_OUT, index=False)
+        mb_oco3 = os.path.getsize(PARQUET_OCO3_OUT) / (1024 * 1024)
+        print(f"  [Success] OCO-3 Super-obs 저장 완료!")
+        print(f"  📍 파일 경로: {PARQUET_OCO3_OUT}")
+        print(f"  📦 용량: {mb_oco3:.1f} MB | Shape: {agg_oco3.shape}")
+
 
 if __name__ == "__main__":
     run_super_observation()

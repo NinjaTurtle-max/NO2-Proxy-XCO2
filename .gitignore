@@ -18,4 +18,4 @@ __pycache__/
 sr_*.csv
 pysr_*.csv
 hall_of_fame_*.csv
-julia_*.log
+*.log

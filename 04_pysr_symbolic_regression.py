@@ -45,8 +45,10 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────
 # 0. 경로 및 상수
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR    = "/mnt/e/dataset/XCO2연구 데이터"
-PARQUET_IN  = os.path.join(BASE_DIR, "anomaly_output/super_obs_dataset.parquet")
+BASE_DIR    = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
+# 02에서 climatology+yearly trend 제거된 anomaly 사용 (super_obs_dataset 아님)
+# split_indices_v2.json도 이 파일 기준으로 생성되었으므로 인덱스 정합성 보장
+PARQUET_IN  = os.path.join(BASE_DIR, "anomaly_output/anom_1d.parquet")
 SPLIT_JSON  = os.path.join(BASE_DIR, "anomaly_output/split_indices_v2.json")
 SCALER_PATH = os.path.join(BASE_DIR, "anomaly_output/scalers_v2.joblib")
 OUT_DIR     = os.path.join(BASE_DIR, "anomaly_output")
@@ -68,26 +70,33 @@ def load_data():
     print("=" * 70)
     
     df = pd.read_parquet(PARQUET_IN)
-    print(f"  [Load] Super-obs Parquet: {len(df):,} rows × {df.shape[1]} cols")
-    
+    print(f"  [Load] anom_1d Parquet: {len(df):,} rows × {df.shape[1]} cols")
+
     # date 변환
     df['date'] = pd.to_datetime(df['date'])
     df['year'] = df['date'].dt.year
     df['month'] = df['date'].dt.month
-    
-    # ── Anomaly Target 생성 ──
-    # 격자별 전체 기간 평균(Baseline)을 빼서 이상치를 추출
-    # (02_xco2_anomaly_extraction.py와 동일한 원리, 1D에서 재산출)
-    grid_mean = df.groupby(['lat_idx', 'lon_idx'])['xco2'].transform('mean')
-    df['xco2_anomaly'] = df['xco2'] - grid_mean
-    
+
+    # ── Anomaly Target: 02에서 이미 climatology+yearly trend 제거 완료 ──
+    # 여기서 재산출하면 안 됨 — 재산출 시 계절성이 타겟에 남아 R² 음수 유발
+    if 'xco2_anomaly' not in df.columns:
+        raise ValueError(
+            "xco2_anomaly 컬럼이 없습니다. "
+            "02_xco2_anomaly_extraction.py를 먼저 실행하세요."
+        )
+
+    # Anomaly 분포 확인 (재산출 여부 검증용)
+    anom = df['xco2_anomaly'].dropna()
+    print(f"  [Anomaly 검증] μ={anom.mean():.4f} ppm, σ={anom.std():.4f} ppm "
+          f"(|μ| < 0.1이면 정상 de-seasonalized)")
+
     # NaN 제거
-    essential_cols = ['xco2_anomaly', 'tropomi_no2', 'era5_wind_speed', 
+    essential_cols = ['xco2_anomaly', 'tropomi_no2', 'era5_wind_speed',
                       'era5_blh', 'era5_u10', 'era5_v10']
     before = len(df)
     df = df.dropna(subset=essential_cols).reset_index(drop=True)
     print(f"  [QC] NaN 제거: {before:,} → {len(df):,} rows")
-    
+
     return df
 
 
@@ -107,7 +116,16 @@ def engineer_physics_features(df: pd.DataFrame) -> pd.DataFrame:
     df['WS_eff']  = np.maximum(df['WS'], U_EFF_MIN)
     df['BLH_eff'] = np.maximum(df['era5_blh'], H_EFF_MIN)
     
-    # ── 2.3 가우시안 플룸 유사 피처 ──
+    # ── 2.3 단위 풍향 벡터 (u/WS_eff, v/WS_eff) ──
+    df['u10_unit'] = df['era5_u10'] / df['WS_eff']
+    df['v10_unit'] = df['era5_v10'] / df['WS_eff']
+
+    # ── 2.4 시간 구성 요소 (Day of Year Sin/Cos) ──
+    df['doy'] = df['date'].dt.dayofyear
+    df['doy_sin'] = np.sin(2 * np.pi * df['doy'] / 365.25)
+    df['doy_cos'] = np.cos(2 * np.pi * df['doy'] / 365.25)
+    
+    # ── 2.5 가우시안 플룸 유사 피처 ──
     # Proxy_simple = NO2 / WS   (단순 확산: 바람이 세면 농도 희석)
     df['proxy_simple'] = df['tropomi_no2'] / df['WS_eff']
     
@@ -188,85 +206,80 @@ def run_pysr(df_train: pd.DataFrame, df_test: pd.DataFrame):
     print("=" * 70)
     
     from pysr import PySRRegressor
-    
-    # ── 4.1 피처 선택 (물리적으로 의미 있는 변수만) ──
-    # PySR에는 이미 해석된 파생 피처를 넣되, 원본도 함께 제공하여
-    # PySR이 자체적으로 최적 조합을 발견하도록 유도
+    from sklearn.preprocessing import StandardScaler
+
+    # ── 4.1 피처 선택 (업데이트된 feature_cols) ──
     feature_cols = [
-        'tropomi_no2',       # [mol/m²] — 핵심 proxy
-        'WS_eff',            # [m/s]   — 유효 풍속
-        'BLH_eff',           # [m]     — 유효 경계층고
-        'log_no2',           # [ln(mol/m²)] — 안정화된 NO2
-        'proxy_simple',      # [mol·s/m³] — NO2/WS
-        'proxy_volume',      # [mol·s/m⁴] — NO2/(WS×BLH)
+        'tropomi_no2',
+        'WS_eff',
+        'BLH_eff',
+        'u10_unit',
+        'v10_unit',
+        'population_density',
+        'odiac_emission',
+        'latitude',
+        'doy_sin',
+        'doy_cos',
     ]
     
-    X_train = df_train[feature_cols].values.astype(np.float64)
-    y_train = df_train['xco2_anomaly'].values.astype(np.float64)
-    X_test  = df_test[feature_cols].values.astype(np.float64)
-    y_test  = df_test['xco2_anomaly'].values.astype(np.float64)
-    
+    X_train_raw = df_train[feature_cols].values.astype(np.float64)
+    y_train_raw = df_train['xco2_anomaly'].values.astype(np.float64)
+    X_test_raw  = df_test[feature_cols].values.astype(np.float64)
+    y_test_raw  = df_test['xco2_anomaly'].values.astype(np.float64)
+
+    # ── 피처 스케일링 ──
+    feat_scaler = StandardScaler()
+    X_train = feat_scaler.fit_transform(X_train_raw)
+    X_test  = feat_scaler.transform(X_test_raw)
+
+    # ── 타겟 스케일링 (y_scaler) ──
+    y_scaler = StandardScaler()
+    y_train = y_scaler.fit_transform(y_train_raw.reshape(-1, 1)).ravel()
+    y_test  = y_scaler.transform(y_test_raw.reshape(-1, 1)).ravel()
+
     print(f"  [Config] Feature columns: {feature_cols}")
-    print(f"  [Config] X_train shape: {X_train.shape}")
-    print(f"  [Config] Target: xco2_anomaly (ppm)")
+    print(f"  [Config] X_train shape: {X_train.shape} (StandardScaler 적용)")
+    print(f"  [Config] Target: xco2_anomaly (StandardScaler 적용)")
     
-    # ── 4.2 PySR Configuration ──
+    # ── 4.2 PySR Configuration (업데이트된 연산자) ──
     model = PySRRegressor(
-        # 탐색 공간
         binary_operators=["+", "-", "*", "/"],
-        unary_operators=["exp", "square", "sqrt", "log1p"],
+        unary_operators=["square", "sqrt", "log1p"],
         
-        # 복잡도 제약 (물리적 개연성 유지)
-        maxsize=15,
+        maxsize=20,  # 피처가 늘어났으므로 복잡도 약간 허용
         nested_constraints={
-            "exp": {"exp": 0},         # exp(exp(x)) 금지
-            "square": {"square": 0},   # square(square(x)) 금지
+            "square": {"square": 0},
             "sqrt": {"sqrt": 0},
         },
         
-        # 탐색 강도 (시간-품질 타협)
         niterations=80,
         populations=30,
         population_size=40,
         ncycles_per_iteration=500,
         
-        # 출력
         output_directory=OUT_DIR,
-        
-        # 재현성
         random_state=42,
         deterministic=True,
         parallelism='serial',
-        procs=0,       # deterministic 모드에서는 단일 프로세스
-        
-        # 모델 선택 기준
+        procs=0,
         model_selection="best",
-        
-        # loss function
         elementwise_loss="loss(prediction, target) = (prediction - target)^2",
-        
-        # 기타
         warm_start=False,
         temp_equation_file=False,
         verbosity=1,
     )
     
-    print("  [Start] PySR 수식 탐색을 시작합니다... (수 분~수십 분 소요)")
-    print("         Julia 런타임 초기화가 첫 실행 시 3-5분 걸릴 수 있습니다.")
-    
-    model.fit(X_train, y_train,
-              variable_names=feature_cols)
-    
-    print("\n  [완료] PySR 수식 탐색 완료!")
-    
-    return model, feature_cols, X_train, y_train, X_test, y_test
+    print("  [Start] PySR 수식 탐색을 시작합니다...")
+    model.fit(X_train, y_train, variable_names=feature_cols)
+
+    return model, feature_cols, X_train, y_train, X_test, y_test, feat_scaler, y_scaler
 
 
 # ─────────────────────────────────────────────────────────────────
 # 5. Pareto Front 분석 및 시각화
 # ─────────────────────────────────────────────────────────────────
 def analyze_pareto(model, feature_cols, X_train, y_train, X_test, y_test, 
-                   df_test: pd.DataFrame):
+                   df_test: pd.DataFrame, y_scaler):
     print("\n" + "=" * 70)
     print("STEP 5: Pareto Front 분석 — 복잡도 vs 정확도 Trade-off")
     print("=" * 70)
@@ -276,22 +289,25 @@ def analyze_pareto(model, feature_cols, X_train, y_train, X_test, y_test,
         print("  [경고] PySR이 수식을 반환하지 못했습니다.")
         return None
     
-    print(f"  [결과] 총 {len(equations)}개의 후보 수식이 Pareto Front에 존재합니다.\n")
-    
-    # ── 5.1 각 수식의 Train/Test 성능 산출 ──
     results = []
     for i, row in equations.iterrows():
         try:
             complexity = row['complexity']
-            loss_train = row['loss']
             
-            y_pred_test = model.predict(X_test, index=i)
-            r2_test  = r2_score(y_test, y_pred_test)
-            rmse_test = np.sqrt(mean_squared_error(y_test, y_pred_test))
-            mae_test = mean_absolute_error(y_test, y_pred_test)
+            # 예측 (Scaled)
+            y_pred_train_scaled = model.predict(X_train, index=i)
+            y_pred_test_scaled  = model.predict(X_test, index=i)
             
-            y_pred_train = model.predict(X_train, index=i)
-            r2_train = r2_score(y_train, y_pred_train)
+            # 역변환 (ppm 단위로 변환)
+            y_pred_test = y_scaler.inverse_transform(y_pred_test_scaled.reshape(-1, 1)).ravel()
+            y_test_ppm  = y_scaler.inverse_transform(y_test.reshape(-1, 1)).ravel()
+            y_train_ppm = y_scaler.inverse_transform(y_train.reshape(-1, 1)).ravel()
+            y_pred_train = y_scaler.inverse_transform(y_pred_train_scaled.reshape(-1, 1)).ravel()
+
+            r2_test  = r2_score(y_test_ppm, y_pred_test)
+            rmse_test = np.sqrt(mean_squared_error(y_test_ppm, y_pred_test))
+            mae_test = mean_absolute_error(y_test_ppm, y_pred_test)
+            r2_train = r2_score(y_train_ppm, y_pred_train)
             
             eq_str = str(row['equation'])
             
@@ -303,17 +319,10 @@ def analyze_pareto(model, feature_cols, X_train, y_train, X_test, y_test,
                 'r2_test': r2_test,
                 'rmse_test': rmse_test,
                 'mae_test': mae_test,
-                'loss_train': loss_train,
                 'overfit_gap': r2_train - r2_test,
             })
             
-            print(f"  [{i:2d}] Complexity={complexity:2d} | "
-                  f"R²_train={r2_train:.4f} | R²_test={r2_test:.4f} | "
-                  f"RMSE={rmse_test:.3f} ppm")
-            if len(eq_str) < 120:
-                print(f"       → {eq_str}")
-            else:
-                print(f"       → {eq_str[:120]}...")
+            print(f"  [{i:2d}] C={complexity:2d} | R²_test={r2_test:.4f} | RMSE={rmse_test:.3f} ppm")
             
         except Exception as e:
             print(f"  [{i:2d}] 평가 실패: {e}")
@@ -321,18 +330,8 @@ def analyze_pareto(model, feature_cols, X_train, y_train, X_test, y_test,
     results_df = pd.DataFrame(results)
     results_df.to_csv(os.path.join(OUT_DIR, "pysr_pareto_results.csv"), index=False)
     
-    # ── 5.2 최적 수식 선정 (Test R² 기준, overfit 경계 내) ──
-    # 과적합 격차가 0.1 이내인 수식 중 Test R² 최대
     stable = results_df[results_df['overfit_gap'] < 0.1]
-    if len(stable) > 0:
-        best_idx = stable.loc[stable['r2_test'].idxmax(), 'index']
-    else:
-        best_idx = results_df.loc[results_df['r2_test'].idxmax(), 'index']
-    
-    best = results_df[results_df['index'] == best_idx].iloc[0]
-    print(f"\n  ★ 최적 수식 (Index {int(best_idx)}):")
-    print(f"    R²_test = {best['r2_test']:.4f}, RMSE = {best['rmse_test']:.3f} ppm")
-    print(f"    Equation: {best['equation']}")
+    best_idx = stable.loc[stable['r2_test'].idxmax(), 'index'] if len(stable) > 0 else results_df.loc[results_df['r2_test'].idxmax(), 'index']
     
     return results_df, int(best_idx)
 
@@ -340,76 +339,40 @@ def analyze_pareto(model, feature_cols, X_train, y_train, X_test, y_test,
 # ─────────────────────────────────────────────────────────────────
 # 6. 시각화: Pareto Front + Parity Plot
 # ─────────────────────────────────────────────────────────────────
-def plot_results(model, results_df, best_idx, X_test, y_test, df_test):
+def plot_results(model, results_df, best_idx, X_test, y_test, y_scaler):
     print("\n" + "=" * 70)
     print("STEP 6: 시각화 생성 (Figure 2 & Figure 3)")
     print("=" * 70)
     
-    # ── Figure 2: Pareto Front (복잡도 vs R² Trade-off) ──
+    # ── Figure 2: Pareto Front ──
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    
     ax1 = axes[0]
     sc = ax1.scatter(results_df['complexity'], results_df['r2_test'], 
-                     c=results_df['overfit_gap'], cmap='RdYlGn_r',
-                     s=80, edgecolors='black', linewidth=0.5, zorder=3)
+                     c=results_df['overfit_gap'], cmap='RdYlGn_r', s=80, edgecolors='black')
+    plt.colorbar(sc, ax=ax1).set_label("Overfit Gap")
+    ax1.set_xlabel("Complexity"); ax1.set_ylabel("R² (Test)")
     
-    # 최적점 강조
-    best_row = results_df[results_df['index'] == best_idx].iloc[0]
-    ax1.scatter(best_row['complexity'], best_row['r2_test'],
-                s=200, marker='*', c='red', edgecolors='black', linewidth=1.5,
-                zorder=5, label=f"Best (C={int(best_row['complexity'])})")
-    
-    ax1.set_xlabel("Complexity (# nodes)", fontsize=12)
-    ax1.set_ylabel("R² (Test Set)", fontsize=12)
-    ax1.set_title("Pareto Front: Complexity vs Predictive Power", fontsize=13, fontweight='bold')
-    ax1.legend(fontsize=11)
-    ax1.grid(True, alpha=0.3)
-    cbar = plt.colorbar(sc, ax=ax1, shrink=0.8)
-    cbar.set_label("Overfit Gap (R²_train − R²_test)", fontsize=10)
-    
-    # ── Figure 3: Parity Plot (예측 vs 관측) ──
+    # ── Figure 3: Parity Plot (Inverse Transformed) ──
     ax2 = axes[1]
-    y_pred = model.predict(X_test, index=best_idx)
+    y_pred_scaled = model.predict(X_test, index=best_idx)
+    y_pred = y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).ravel()
+    y_test_ppm = y_scaler.inverse_transform(y_test.reshape(-1, 1)).ravel()
     
-    # Density scatter
-    xy = np.vstack([y_test, y_pred])
-    try:
-        z = stats.gaussian_kde(xy)(xy)
-        idx_sort = z.argsort()
-        ax2.scatter(y_test[idx_sort], y_pred[idx_sort], c=z[idx_sort],
-                    s=3, alpha=0.6, cmap='viridis', rasterized=True)
-    except Exception:
-        ax2.scatter(y_test, y_pred, s=2, alpha=0.3, c='#2CA02C', rasterized=True)
+    ax2.scatter(y_test_ppm, y_pred, s=3, alpha=0.4)
+    lims = [min(y_test_ppm.min(), y_pred.min()), max(y_test_ppm.max(), y_pred.max())]
+    ax2.plot(lims, lims, 'r--')
     
-    # 1:1 line
-    lims = [min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())]
-    margin = (lims[1] - lims[0]) * 0.05
-    lims = [lims[0] - margin, lims[1] + margin]
-    ax2.plot(lims, lims, 'r--', lw=1.5, alpha=0.7, label='1:1 Line')
-    ax2.set_xlim(lims); ax2.set_ylim(lims)
+    r2 = r2_score(y_test_ppm, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_test_ppm, y_pred))
+    mae = mean_absolute_error(y_test_ppm, y_pred)
     
-    r2  = r2_score(y_test, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-    mae = mean_absolute_error(y_test, y_pred)
+    ax2.set_title(f"Parity (R²={r2:.3f}, RMSE={rmse:.3f} ppm)")
+    ax2.set_xlabel("Observed (ppm)"); ax2.set_ylabel("Predicted (ppm)")
     
-    ax2.set_xlabel("Observed XCO₂ Anomaly (ppm)", fontsize=12)
-    ax2.set_ylabel("Predicted XCO₂ Anomaly (ppm)", fontsize=12)
-    ax2.set_title("Parity Plot: Best PySR Equation", fontsize=13, fontweight='bold')
-    
-    stats_text = f"R² = {r2:.4f}\nRMSE = {rmse:.3f} ppm\nMAE = {mae:.3f} ppm\nN = {len(y_test):,}"
-    ax2.text(0.05, 0.95, stats_text, transform=ax2.transAxes,
-             fontsize=11, verticalalignment='top',
-             bbox=dict(boxstyle='round,pad=0.4', facecolor='wheat', alpha=0.8))
-    ax2.legend(fontsize=10)
-    ax2.grid(True, alpha=0.3)
-    
-    fig.tight_layout()
-    fig_path = os.path.join(OUT_DIR, "Figure_2_PySR_Pareto_and_Parity.png")
-    fig.savefig(fig_path, dpi=300, bbox_inches='tight')
+    fig.savefig(os.path.join(OUT_DIR, "Figure_2_PySR_Results.png"), dpi=300)
     plt.close(fig)
-    print(f"  [저장] {fig_path}")
     
-    return r2, rmse, mae, y_pred
+    return r2, rmse, mae, y_pred, y_test_ppm
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -464,7 +427,7 @@ def spatial_residual_analysis(df_test, y_pred, y_test):
 # ─────────────────────────────────────────────────────────────────
 # 8. 물리적 해석 보고서 생성
 # ─────────────────────────────────────────────────────────────────
-def generate_report(model, results_df, best_idx, r2, rmse, mae, lat_stats):
+def generate_report(model, results_df, best_idx, r2, rmse, mae, lat_stats, feat_scaler=None, feature_cols=None):
     print("\n" + "=" * 70)
     print("STEP 8: 물리적 해석 보고서 (Markdown) 생성")
     print("=" * 70)
@@ -538,7 +501,24 @@ PySR이 발견한 수식에서 **NO₂/WS** 또는 **NO₂/(WS×BLH)** 형태의
     report += f"""
 ---
 
-## 5. 초록 기입용 핵심 수치 요약
+## 5. 피처 스케일링 역변환 정보 (수식 물리 해석용)
+
+> PySR 입력 피처는 StandardScaler로 정규화됨.
+> 수식의 변수 x_i는 실제 물리량 f_i에 대해 **x_i = (f_i − μ_i) / σ_i** 관계.
+
+| 피처 | μ (mean) | σ (std) |
+| :--- | ---: | ---: |
+"""
+    if feat_scaler is not None and feature_cols is not None:
+        for col, mu, sig in zip(feature_cols, feat_scaler.mean_, feat_scaler.scale_):
+            report += f"| `{col}` | {mu:.6g} | {sig:.6g} |\n"
+    else:
+        report += "| (스케일러 정보 없음) | — | — |\n"
+
+    report += f"""
+---
+
+## 6. 초록 기입용 핵심 수치 요약
 
 > 본 연구에서 PySR 기호 회귀를 통해 도출된 최적 proxy 수식은 독립적 테스트 데이터셋에 대해
 > **R² = {r2:.4f}, RMSE = {rmse:.3f} ppm**의 예측 성능을 보였으며,
@@ -581,20 +561,21 @@ if __name__ == "__main__":
     df_train_full, df_test_full, df_val, df_train_sr, df_test_sr = split_data(df)
     
     # 4. PySR 실행
-    model, feat_cols, X_train, y_train, X_test, y_test = run_pysr(df_train_sr, df_test_sr)
+    model, feat_cols, X_train, y_train, X_test, y_test, feat_scaler, y_scaler = run_pysr(df_train_sr, df_test_sr)
     
     # 5. Pareto Front 분석
-    results_df, best_idx = analyze_pareto(model, feat_cols, X_train, y_train, X_test, y_test, df_test_sr)
+    results_df, best_idx = analyze_pareto(model, feat_cols, X_train, y_train, X_test, y_test, df_test_sr, y_scaler)
     
     if results_df is not None:
         # 6. 시각화
-        r2, rmse, mae, y_pred = plot_results(model, results_df, best_idx, X_test, y_test, df_test_sr)
+        r2, rmse, mae, y_pred, y_test_ppm = plot_results(model, results_df, best_idx, X_test, y_test, y_scaler)
         
-        # 7. 공간 잔차
-        lat_stats = spatial_residual_analysis(df_test_sr, y_pred, y_test)
+        # 7. 공간 잔차 (ppm 단위 사용)
+        lat_stats = spatial_residual_analysis(df_test_sr, y_pred, y_test_ppm)
         
         # 8. 보고서
-        generate_report(model, results_df, best_idx, r2, rmse, mae, lat_stats)
+        generate_report(model, results_df, best_idx, r2, rmse, mae, lat_stats,
+                        feat_scaler=feat_scaler, feature_cols=feat_cols)
     
     print("\n" + "=" * 70)
     print("✅ Phase 2 · Step 5 완료: PySR 기호 회귀 수식 도출 및 검증 완료!")
