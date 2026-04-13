@@ -29,6 +29,8 @@ try:
 except ImportError:
     HAS_CARTOPY = False
 
+plt.rcParams['font.family'] = 'AppleGothic'
+plt.rcParams['axes.unicode_minus'] = False
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # ─────────────────────────────────────────────────────────────────
@@ -63,6 +65,17 @@ GAP_MONTHS    = 3                     # Train/Test/Val 사이 시간 격리 (월
 SPLIT_RATIO   = {"train": 0.7, "test": 0.15, "val": 0.15}  # 할당 우선순위: train → test → val
 FORWARD_CHAIN_MIN_TRAIN = 500         # Forward-chaining CV 최소 Train 관측
 
+# 공간 균형 보정 설정 (Spatial Balance)
+REGION_BINS = {
+    "West_China":  (100.0, 115.0),   # 중국 서부·내륙 (Inner Mongolia 포함)
+    "East_China":  (115.0, 128.0),   # 중국 동부·황해
+    "Korea_Japan": (128.0, 145.0),   # 한국·일본
+    "Far_East":    (145.0, 150.0),   # 러시아 극동
+}
+MAX_PER_GRID   = 15   # 격자당 최대 관측 수 (|xco2_anomaly| 상위 보존)
+KJ_MULTIPLIER  = {"West_China": 3, "East_China": 2, "Korea_Japan": 1, "Far_East": 1}
+PARQUET_BALANCED_OUT = os.path.join(OUT_DIR, "anom_1d_balanced.parquet")
+
 
 # ═════════════════════════════════════════════════════════════════
 # STEP 1: 데이터 로드 및 시간 인덱스 부여
@@ -78,9 +91,16 @@ def load_data() -> pd.DataFrame:
     df["month"] = df["date"].dt.month
     df["year_month"] = df["date"].dt.to_period("M")
 
+    # 경도 기반 EAIC sub-region 레이블 (stratified split용)
+    df["eaic_region"] = "Other"
+    for name, (lo, hi) in REGION_BINS.items():
+        df.loc[(df["longitude"] >= lo) & (df["longitude"] < hi), "eaic_region"] = name
+
     print(f"  로드: {len(df):,} 행, {df['date'].min().date()} ~ {df['date'].max().date()}")
     print(f"  고유 날짜: {df['date'].nunique():,} 일")
     print(f"  고유 연-월: {df['year_month'].nunique()} 개")
+    region_counts = df["eaic_region"].value_counts()
+    print(f"  EAIC sub-region 분포: {dict(region_counts)}")
     return df
 
 
@@ -191,8 +211,8 @@ def plot_figure_1(r_map, n_map, sig_map) -> None:
     print("STEP 3: Figure 1 렌더링 (3-panel: Correlation / Density / N≥100 Filtered)")
     print("=" * 70)
 
-    # N≥100 필터 적용 r 맵 (궤도 아티팩트 제거 버전)
-    N_THRESH = 100
+    # N≥30 필터 적용 r 맵 (중심극한정리 기반 현실적 임계값)
+    N_THRESH = 30
     r_filtered = np.where(n_map >= N_THRESH, r_map, np.nan)
     n_filtered_grids = np.isfinite(r_filtered).sum()
     print(f"  N ≥ {N_THRESH} 격자 수 (c패널 표시 대상): {n_filtered_grids:,}")
@@ -276,97 +296,135 @@ def plot_figure_1(r_map, n_map, sig_map) -> None:
 
 
 # ═════════════════════════════════════════════════════════════════
-# STEP 4: 시간 기반 Data Split (GAP_MONTHS >= 3, Leakage-free)
+# STEP 4: Sub-region별 Stratified Temporal Split
 # ═════════════════════════════════════════════════════════════════
-def temporal_split(df: pd.DataFrame) -> dict:
-    """시계열 기반 Train/Test/Val 분할 (GAP >= 3개월).
+def stratified_temporal_split(df: pd.DataFrame,
+                               train_years: list,
+                               val_years: list,
+                               test_years: list,
+                               gap_months: int = 3) -> dict:
+    """sub-region별로 균등 시간 분할 보장.
 
-    할당 우선순위: Train → Test → Val 순서로 블록을 확보합니다.
-    이를 통해 Train이 항상 가장 많은 데이터를 확보하며,
-    Test와 Val은 미래 시점에서 추출됩니다.
+    각 eaic_region에서 동일한 연도 기준으로 행을 추출하여
+    지역 편향 없이 Train/Val/Test 세트를 구성합니다.
 
-    시계열 구조:
-        [=== TRAIN ===] ... GAP ... [= TEST =] ... GAP ... [= VAL =]
+    Args:
+        df: 입력 DataFrame (eaic_region, year 컬럼 필요)
+        train_years: Train에 포함할 연도 리스트
+        val_years:   Validation에 포함할 연도 리스트
+        test_years:  Test에 포함할 연도 리스트
+        gap_months:  구분 참조용 (현재 연도 단위 분할에서는 로깅 목적)
+
+    Returns:
+        splits: {'train': [idx, ...], 'val': [idx, ...], 'test': [idx, ...]}
     """
     print("\n" + "=" * 70)
-    print("STEP 4: Temporal Data Split (GAP_MONTHS >= 3)")
+    print("STEP 4: Sub-region Stratified Temporal Split")
+    print("=" * 70)
+    print(f"  Train 연도: {train_years}")
+    print(f"  Val   연도: {val_years}")
+    print(f"  Test  연도: {test_years}")
+    print(f"  GAP 참조값: {gap_months} 개월")
+
+    splits = {"train": [], "val": [], "test": []}
+
+    for region in df["eaic_region"].unique():
+        sub_df = df[df["eaic_region"] == region]
+        sub_train = sub_df[sub_df["year"].isin(train_years)].index.tolist()
+        sub_val   = sub_df[sub_df["year"].isin(val_years)].index.tolist()
+        sub_test  = sub_df[sub_df["year"].isin(test_years)].index.tolist()
+
+        splits["train"].extend(sub_train)
+        splits["val"].extend(sub_val)
+        splits["test"].extend(sub_test)
+
+    # 각 세트 내 sub-region 비율 보고
+    for s, idx in splits.items():
+        if len(idx) == 0:
+            print(f"  [{s}] N=0 — 해당 연도 데이터 없음")
+            continue
+        region_dist = df.loc[idx, "eaic_region"].value_counts(normalize=True) * 100
+        print(f"  [{s}] N={len(idx):,}, 지역 비율: {dict(region_dist.round(1))}")
+
+    return splits
+
+
+# ═════════════════════════════════════════════════════════════════
+# STEP 4.5: 공간 균형 보정 (Variance-based Grid Cap + Regional Undersampling)
+# ═════════════════════════════════════════════════════════════════
+def spatial_balance(df: pd.DataFrame) -> pd.DataFrame:
+    """Variance-based Grid Cap + Regional Undersampling.
+
+    Step 1: 각 격자 내에서 |xco2_anomaly|가 큰 관측(물리 신호 풍부)을
+            우선 보존하고 MAX_PER_GRID 개로 제한.
+            → Inner Mongolia 반복 배경 관측 억제, Plume 신호 보존.
+
+    Step 2: 지역별 행 수 상한 (West_China ≤ 3×Korea_Japan)을 적용.
+            Split 비율을 유지하며 언더샘플링하여 Temporal Leakage 방지.
+    """
+    print("\n" + "=" * 70)
+    print("STEP 4.5: Spatial Balance (Variance-based Cap + Regional Undersampling)")
     print("=" * 70)
 
-    # 연월 단위 정렬
-    all_ym = sorted(df["year_month"].unique())
-    n_months = len(all_ym)
-    print(f"  총 연-월 블록: {n_months} 개 ({all_ym[0]} ~ {all_ym[-1]})")
+    df = df.copy()
 
-    # 유효 연산 월(갭 제외): n_months - 2*GAP_MONTHS
-    usable = n_months - 2 * GAP_MONTHS
-    if usable <= 0:
-        raise ValueError(f"데이터 기간({n_months}개월)이 GAP({GAP_MONTHS}*2)보다 짧습니다.")
+    # 경도 기반 지역 레이블
+    df["region"] = "Other"
+    for name, (lo, hi) in REGION_BINS.items():
+        df.loc[(df["longitude"] >= lo) & (df["longitude"] < hi), "region"] = name
 
-    n_train = int(np.floor(usable * SPLIT_RATIO["train"]))
-    n_test  = int(np.floor(usable * SPLIT_RATIO["test"]))
-    n_val   = usable - n_train - n_test  # 나머지는 Val에 흡수
+    # ── Step 1: Variance-based Grid Cap ──
+    before_cap = len(df)
+    df["xco2_anomaly_abs"] = df["xco2_anomaly"].abs()
 
-    # 블록 할당
-    train_months = all_ym[:n_train]
-    test_start   = n_train + GAP_MONTHS
-    test_months  = all_ym[test_start:test_start + n_test]
-    val_start    = test_start + n_test + GAP_MONTHS
-    val_months   = all_ym[val_start:val_start + n_val]
-    gap1_months  = all_ym[n_train:test_start]
-    gap2_months  = all_ym[test_start + n_test:val_start]
+    def _variance_cap(grp):
+        if len(grp) <= MAX_PER_GRID:
+            return grp
+        return grp.nlargest(MAX_PER_GRID, "xco2_anomaly_abs")
 
-    print(f"\n  ┌─ Train : {train_months[0]} ~ {train_months[-1]} ({len(train_months)} 개월)")
-    print(f"  │  GAP 1 : {gap1_months[0]} ~ {gap1_months[-1]} ({len(gap1_months)} 개월)")
-    print(f"  ├─ Test  : {test_months[0]} ~ {test_months[-1]} ({len(test_months)} 개월)")
-    print(f"  │  GAP 2 : {gap2_months[0]} ~ {gap2_months[-1]} ({len(gap2_months)} 개월)")
-    print(f"  └─ Val   : {val_months[0]} ~ {val_months[-1]} ({len(val_months)} 개월)")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        df = (df.groupby(["lat_idx", "lon_idx"], group_keys=False)
+                .apply(_variance_cap)
+                .reset_index(drop=True))
+    df = df.drop(columns=["xco2_anomaly_abs"])
+    print(f"  [Grid Cap] {before_cap:,} → {len(df):,} 행  (격자당 최대 {MAX_PER_GRID}개, |anomaly| 상위 보존)")
 
-    # DataFrame 분할
-    train_set = set(train_months)
-    test_set  = set(test_months)
-    val_set   = set(val_months)
+    # ── Step 2: Regional Undersampling ──
+    kj_count = (df["region"] == "Korea_Japan").sum()
+    if kj_count == 0:
+        print("  ⚠️ Korea_Japan 관측 없음 — Regional Undersampling 건너뜀")
+        return df
 
-    df["split"] = "gap"
-    df.loc[df["year_month"].isin(train_set), "split"] = "train"
-    df.loc[df["year_month"].isin(test_set),  "split"] = "test"
-    df.loc[df["year_month"].isin(val_set),   "split"] = "val"
+    print(f"\n  Korea_Japan 기준 행수: {kj_count:,}")
+    balanced_parts = []
+    for region, grp in df.groupby("region"):
+        multiplier = KJ_MULTIPLIER.get(region, 1)
+        target = kj_count * multiplier
+        if len(grp) > target and target > 0:
+            # split 비율 유지하면서 언더샘플링
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=FutureWarning)
+                sampled = (grp.groupby("split", group_keys=False)
+                              .apply(lambda s: s.sample(
+                                  n=max(1, round(target * len(s) / len(grp))),
+                                  random_state=42)))
+            print(f"  {region:<15}: {len(grp):>7,} → {len(sampled):>7,} 행  (목표 {target:,})")
+        else:
+            sampled = grp
+            print(f"  {region:<15}: {len(grp):>7,} 행  (유지)")
+        balanced_parts.append(sampled)
 
-    # 행 수 보고
-    counts = df["split"].value_counts()
-    for s in ["train", "test", "val", "gap"]:
-        c = counts.get(s, 0)
-        pct = c / len(df) * 100
-        print(f"  {s:>5}: {c:>8,} 행 ({pct:5.1f}%)")
+    df_balanced = (pd.concat(balanced_parts)
+                     .sort_values(["date", "lat_idx", "lon_idx"])
+                     .reset_index(drop=True))
 
-    # Forward-chaining CV 제안
-    train_count = counts.get("train", 0)
-    if train_count < FORWARD_CHAIN_MIN_TRAIN:
-        print(f"\n  ⚠️ Train set ({train_count}) < {FORWARD_CHAIN_MIN_TRAIN} — "
-              "Forward-chaining CV를 권장합니다.")
-        print("     → 시간순으로 확장하는 Expanding Window 방식을 채택하십시오.")
-    else:
-        print(f"\n  ✅ Train set ({train_count:,}) 충분 — 단일 Hold-out Split 유효")
+    print(f"\n  [보정 후 총 행수]: {len(df_balanced):,}")
+    print(f"  [보정 후 지역 × Split 분포]")
+    cross = pd.crosstab(df_balanced["region"], df_balanced["split"])
+    print(cross.to_string())
 
-    # JSON 저장 (인덱스 기반)
-    split_dict = {
-        "train_indices": df[df["split"] == "train"].index.tolist(),
-        "test_indices":  df[df["split"] == "test"].index.tolist(),
-        "val_indices":   df[df["split"] == "val"].index.tolist(),
-        "gap_indices":   df[df["split"] == "gap"].index.tolist(),
-        "metadata": {
-            "gap_months": GAP_MONTHS,
-            "train_period": f"{train_months[0]} ~ {train_months[-1]}",
-            "test_period":  f"{test_months[0]} ~ {test_months[-1]}",
-            "val_period":   f"{val_months[0]} ~ {val_months[-1]}",
-            "split_ratio":  SPLIT_RATIO,
-        },
-    }
-
-    with open(SPLIT_PATH, "w") as f:
-        json.dump(split_dict, f, indent=2, default=str)
-    print(f"\n  인덱스 저장: {SPLIT_PATH}")
-
-    return df, split_dict
+    return df_balanced
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -539,17 +597,71 @@ if __name__ == "__main__":
     # 1. 데이터 로드
     df = load_data()
 
-    # 2. 공간 상관 계수 + FDR 보정
-    r_map, p_map, n_map, sig_map = compute_spatial_correlation(df)
+    # 2. Sub-region Stratified Temporal Split (공간 균형 보정 전)
+    all_years = sorted(df["year"].unique())
+    n_y = len(all_years)
+    n_train_y = max(1, int(np.floor(n_y * SPLIT_RATIO["train"])))
+    n_test_y  = max(1, int(np.floor(n_y * SPLIT_RATIO["test"])))
+    n_val_y   = max(1, n_y - n_train_y - n_test_y)
 
-    # 3. Figure 1 렌더링
+    train_years = all_years[:n_train_y]
+    test_years  = all_years[n_train_y:n_train_y + n_test_y]
+    val_years   = all_years[n_train_y + n_test_y:n_train_y + n_test_y + n_val_y]
+
+    splits = stratified_temporal_split(
+        df, train_years=train_years, val_years=val_years,
+        test_years=test_years, gap_months=GAP_MONTHS,
+    )
+
+    # df에 split 컬럼 부여 (gap = 어느 세트에도 미포함 행)
+    df["split"] = "gap"
+    df.loc[splits["train"], "split"] = "train"
+    df.loc[splits["val"],   "split"] = "val"
+    df.loc[splits["test"],  "split"] = "test"
+
+    split_dict = {
+        "train_indices": splits["train"],
+        "test_indices":  splits["test"],
+        "val_indices":   splits["val"],
+        "gap_indices":   df[df["split"] == "gap"].index.tolist(),
+        "metadata": {
+            "gap_months":  GAP_MONTHS,
+            "train_years": [int(y) for y in train_years],
+            "test_years":  [int(y) for y in test_years],
+            "val_years":   [int(y) for y in val_years],
+            "split_ratio": SPLIT_RATIO,
+        },
+    }
+    with open(SPLIT_PATH, "w") as f:
+        json.dump(split_dict, f, indent=2, default=str)
+    print(f"\n  인덱스 저장: {SPLIT_PATH}")
+
+    # 3. 공간 균형 보정 (지역 편향 제거)
+    df = spatial_balance(df)
+
+    # 균형 보정 후 split 인덱스 재저장 (인덱스가 reset됐으므로 반드시 갱신)
+    split_dict_balanced = {
+        "train_indices": df[df["split"] == "train"].index.tolist(),
+        "test_indices":  df[df["split"] == "test"].index.tolist(),
+        "val_indices":   df[df["split"] == "val"].index.tolist(),
+        "gap_indices":   df[df["split"] == "gap"].index.tolist(),
+        "metadata": split_dict["metadata"],
+    }
+    with open(SPLIT_PATH, "w") as f:
+        json.dump(split_dict_balanced, f, indent=2, default=str)
+    print(f"\n  Split 인덱스 재저장 (균형 보정 반영): {SPLIT_PATH}")
+
+    # 균형 데이터 별도 저장 (04_pysr 입력용)
+    df.to_parquet(PARQUET_BALANCED_OUT, index=False)
+    print(f"  균형 데이터 저장: {PARQUET_BALANCED_OUT}")
+
+    # 4. 균형 데이터 기준 공간 상관 계수 재산출 + Figure 1 렌더링
+    #    (균형 보정 후 n_map이 지역 편향 없이 산출되어 N≥30 필터 의미 있음)
+    r_map, p_map, n_map, sig_map = compute_spatial_correlation(df)
     plot_figure_1(r_map, n_map, sig_map)
 
-    # 4. 시계열 Data Split
-    df, split_dict = temporal_split(df)
-
     # 5. Feature Scaling
-    scaler_bundle = fit_scalers(df, split_dict)
+    scaler_bundle = fit_scalers(df, split_dict_balanced)
 
     # 6. OCO-3 독립 검증 세트
     export_oco3_validation(scaler_bundle)

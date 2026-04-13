@@ -24,7 +24,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────
 # 경로 설정
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR    = "/mnt/e/dataset/XCO2연구 데이터"
+BASE_DIR    = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
 NC_PATH     = os.path.join(BASE_DIR, "integrated_dataset.nc")
 OUT_PARQUET = os.path.join(BASE_DIR, "ml_ready_dataset.parquet")
 OUT_REPORT  = os.path.join(BASE_DIR, "qc_report.md")
@@ -103,6 +103,9 @@ def load_nc_to_df(nc_path: str) -> pd.DataFrame:
             elif name == "sounding_id":
                 # 15자리 정수 ID → int64 보존 (float32 변환 시 오버플로우/정밀도 손실)
                 data[name] = arr.astype(np.int64)
+            elif name == "file_source":
+                # 위성 파일명 보존 (문자열 그대로 유지)
+                data[name] = arr
             else:
                 data[name] = arr.astype(np.float32)
 

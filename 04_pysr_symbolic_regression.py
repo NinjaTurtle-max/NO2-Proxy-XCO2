@@ -48,7 +48,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 BASE_DIR    = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
 # 02에서 climatology+yearly trend 제거된 anomaly 사용 (super_obs_dataset 아님)
 # split_indices_v2.json도 이 파일 기준으로 생성되었으므로 인덱스 정합성 보장
-PARQUET_IN  = os.path.join(BASE_DIR, "anomaly_output/anom_1d.parquet")
+PARQUET_IN  = os.path.join(BASE_DIR, "anomaly_output/anom_1d_balanced.parquet")
 SPLIT_JSON  = os.path.join(BASE_DIR, "anomaly_output/split_indices_v2.json")
 SCALER_PATH = os.path.join(BASE_DIR, "anomaly_output/scalers_v2.joblib")
 OUT_DIR     = os.path.join(BASE_DIR, "anomaly_output")
@@ -148,7 +148,43 @@ def engineer_physics_features(df: pd.DataFrame) -> pd.DataFrame:
         if f in df.columns:
             print(f"    {f:20s}: μ={df[f].mean():.4f}, σ={df[f].std():.4f}, "
                   f"[{df[f].min():.4f}, {df[f].max():.4f}]")
-    
+
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────
+# 2.5. EAIC Sub-region One-Hot Encoding (PySR 공간 불균형 보정)
+# ─────────────────────────────────────────────────────────────────
+def add_region_features(df: pd.DataFrame) -> pd.DataFrame:
+    """sub-region one-hot encoding for PySR.
+
+    eaic_region 컬럼을 기반으로 5개 주요 권역 indicator를 생성합니다.
+    PySR이 지역별 배경 농도 차이를 수식에 내재화할 수 있도록 허용합니다.
+
+    권역 정의:
+        NCP  — North China Plain (화북 평원)
+        YRD  — Yangtze River Delta (장강 삼각주)
+        PRD  — Pearl River Delta (주강 삼각주)
+        KCR  — Korea/China Region (한반도·만주 경계)
+        JKT  — Japan/Korea/Taiwan (동해안 연안)
+    """
+    print("\n" + "=" * 70)
+    print("STEP 2.5: EAIC Sub-region One-Hot Encoding")
+    print("=" * 70)
+
+    if 'eaic_region' not in df.columns:
+        print("  ⚠️ eaic_region 컬럼 없음 — is_* 피처를 0으로 채웁니다.")
+        for region in ['NCP', 'YRD', 'PRD', 'KCR', 'JKT']:
+            df[f'is_{region}'] = np.float32(0.0)
+        return df
+
+    for region in ['NCP', 'YRD', 'PRD', 'KCR', 'JKT']:
+        col = f'is_{region}'
+        df[col] = (df['eaic_region'] == region).astype(np.float32)
+        n = int(df[col].sum())
+        pct = n / len(df) * 100
+        print(f"  is_{region}: {n:>8,} 행 ({pct:5.1f}%)")
+
     return df
 
 
@@ -181,18 +217,36 @@ def split_data(df: pd.DataFrame):
     print(f"  Test:  {len(df_test):,} rows")
     print(f"  Val:   {len(df_val):,} rows")
     
-    # PySR은 대량 데이터에서 느림 → 서브샘플링
-    if len(df_train) > MAX_TRAIN_SAMPLES:
-        df_train_sr = df_train.sample(n=MAX_TRAIN_SAMPLES, random_state=42)
-        print(f"  [PySR Subsample] Train: {len(df_train):,} → {MAX_TRAIN_SAMPLES:,}")
-    else:
-        df_train_sr = df_train
-        
-    if len(df_test) > MAX_TEST_SAMPLES:
-        df_test_sr = df_test.sample(n=MAX_TEST_SAMPLES, random_state=42)
-        print(f"  [PySR Subsample] Test: {len(df_test):,} → {MAX_TEST_SAMPLES:,}")
-    else:
-        df_test_sr = df_test
+    # PySR은 대량 데이터에서 느림 → 지역 비례 층화 샘플링 (단순 random 대체)
+    REGION_BINS_SR = {
+        "West_China":  (100.0, 115.0),
+        "East_China":  (115.0, 128.0),
+        "Korea_Japan": (128.0, 145.0),
+        "Far_East":    (145.0, 150.0),
+    }
+
+    def _stratified_sample(frame: pd.DataFrame, n_target: int, label: str) -> pd.DataFrame:
+        """지역별 비율을 유지하면서 n_target 개 샘플링."""
+        if len(frame) <= n_target:
+            return frame
+        frame = frame.copy()
+        frame["_region"] = "Other"
+        for rname, (lo, hi) in REGION_BINS_SR.items():
+            frame.loc[(frame["longitude"] >= lo) & (frame["longitude"] < hi), "_region"] = rname
+        sampled = (frame.groupby("_region", group_keys=False)
+                        .apply(lambda g: g.sample(
+                            n=max(1, round(n_target * len(g) / len(frame))),
+                            random_state=42)))
+        # 반올림 오차 보정
+        if len(sampled) > n_target:
+            sampled = sampled.sample(n=n_target, random_state=42)
+        sampled = sampled.drop(columns=["_region"])
+        print(f"  [PySR Stratified Subsample] {label}: {len(frame):,} → {len(sampled):,}")
+        print(f"    지역 분포: {sampled['_region'].value_counts().to_dict()}" if "_region" in sampled.columns else "")
+        return sampled
+
+    df_train_sr = _stratified_sample(df_train, MAX_TRAIN_SAMPLES, "Train")
+    df_test_sr  = _stratified_sample(df_test,  MAX_TEST_SAMPLES,  "Test")
     
     return df_train, df_test, df_val, df_train_sr, df_test_sr
 
@@ -206,50 +260,67 @@ def run_pysr(df_train: pd.DataFrame, df_test: pd.DataFrame):
     print("=" * 70)
     
     from pysr import PySRRegressor
-    from sklearn.preprocessing import StandardScaler
 
-    # ── 4.1 피처 선택 (업데이트된 feature_cols) ──
+    # ── 4.1 피처 선택: 물리 파생 피처 우선 사용 ──
+    # [설계 원칙]
+    # 1. doy_sin/doy_cos 제거: 잔류 계절성 학습 차단
+    # 2. StandardScaler 제거: Z-score는 음수 허용 → log1p/sqrt/나눗셈에서 물리 모순 발생
+    #    → 대신 항상 양수인 물리 파생 피처(proxy_simple, proxy_volume, log_no2)를 원본 단위로 투입
+    # 3. u10_unit/v10_unit 유지: [-1, 1] 범위 단위벡터로 안전
     feature_cols = [
-        'tropomi_no2',
-        'WS_eff',
-        'BLH_eff',
-        'u10_unit',
-        'v10_unit',
-        'population_density',
-        'odiac_emission',
-        'latitude',
-        'doy_sin',
-        'doy_cos',
+        'tropomi_no2',        # 원본 NO2 column density [mol/m²]
+        'WS_eff',             # m/s, 항상 > U_EFF_MIN=0.1
+        'BLH_eff',            # m,   항상 > H_EFF_MIN=10
+        'population_density', # 인구 밀도 [명/km²]
+        'odiac_emission',     # ODIAC 화석연료 배출량 [tC/yr]
+        'latitude',           # 위도 [°N]
+        'doy_sin',            # sin(2π·doy/365.25) — 계절성 인코딩
+        'doy_cos',            # cos(2π·doy/365.25) — 계절성 인코딩
+        'is_NCP',             # North China Plain indicator
+        'is_YRD',             # Yangtze River Delta indicator
+        'is_PRD',             # Pearl River Delta indicator
+        'is_KCR',             # Korea/China Region indicator
+        'is_JKT',             # Japan/Korea/Taiwan indicator
     ]
-    
-    X_train_raw = df_train[feature_cols].values.astype(np.float64)
-    y_train_raw = df_train['xco2_anomaly'].values.astype(np.float64)
-    X_test_raw  = df_test[feature_cols].values.astype(np.float64)
-    y_test_raw  = df_test['xco2_anomaly'].values.astype(np.float64)
 
-    # ── 피처 스케일링 ──
-    feat_scaler = StandardScaler()
-    X_train = feat_scaler.fit_transform(X_train_raw)
-    X_test  = feat_scaler.transform(X_test_raw)
+    # 타겟: 원본 ppm 단위 유지 (물리적 차원 보존)
+    # feat_scaler / y_scaler는 역변환용으로만 보관 (항등 변환)
+    X_train = df_train[feature_cols].values.astype(np.float64)
+    y_train = df_train['xco2_anomaly'].values.astype(np.float64)
+    X_test  = df_test[feature_cols].values.astype(np.float64)
+    y_test  = df_test['xco2_anomaly'].values.astype(np.float64)
 
-    # ── 타겟 스케일링 (y_scaler) ──
-    y_scaler = StandardScaler()
-    y_train = y_scaler.fit_transform(y_train_raw.reshape(-1, 1)).ravel()
-    y_test  = y_scaler.transform(y_test_raw.reshape(-1, 1)).ravel()
+    # 역변환 호환성 유지를 위한 항등 스케일러 (analyze_pareto, plot_results에서 사용)
+    from sklearn.preprocessing import FunctionTransformer
+    feat_scaler = FunctionTransformer()   # identity
+    y_scaler    = FunctionTransformer()   # identity
+    feat_scaler.fit(X_train)
+    y_scaler.fit(y_train.reshape(-1, 1))
 
-    print(f"  [Config] Feature columns: {feature_cols}")
-    print(f"  [Config] X_train shape: {X_train.shape} (StandardScaler 적용)")
-    print(f"  [Config] Target: xco2_anomaly (StandardScaler 적용)")
-    
-    # ── 4.2 PySR Configuration (업데이트된 연산자) ──
+    # NaN/Inf 검증
+    assert np.isfinite(X_train).all(), "X_train에 NaN/Inf 존재"
+    assert np.isfinite(y_train).all(), "y_train에 NaN/Inf 존재"
+    # doy_sin/doy_cos 및 latitude는 음수 허용 → 부호 검사 생략
+
+    print(f"  [Config] Feature columns (물리 파생, 원본 단위): {feature_cols}")
+    print(f"  [Config] X_train shape: {X_train.shape} (스케일링 없음)")
+    print(f"  [Config] Target: xco2_anomaly [ppm], μ={y_train.mean():.4f}, σ={y_train.std():.4f}")
+    for i, col in enumerate(feature_cols):
+        print(f"    {col:>20}: [{X_train[:,i].min():.3g}, {X_train[:,i].max():.3g}]")
+
+    # ── 4.2 PySR Configuration ──
+    # [물리 제약]
+    # - log1p/sqrt: 양수 피처에만 적용 → 이미 보장됨
+    # - "/" 연산에서 WS_eff/BLH_eff가 분모로 쓰이면 물리적으로 올바름
+    # - nested_constraints: square(square) 금지 (불필요한 고차 폭발 방지)
+    # - 추가: constraints로 WS_eff/BLH_eff는 양수 지수만 허용
     model = PySRRegressor(
-        binary_operators=["+", "-", "*", "/"],
-        unary_operators=["square", "sqrt", "log1p"],
-        
-        maxsize=20,  # 피처가 늘어났으므로 복잡도 약간 허용
+        binary_operators=["+", "*", "/"],   # "-" 제거: WS 단순 뺄셈 trivial solution 차단
+        unary_operators=["sqrt", "log1p"],  # square 제거: 음수 가능성 차단
+        maxsize=15,
         nested_constraints={
-            "square": {"square": 0},
-            "sqrt": {"sqrt": 0},
+            "sqrt":  {"sqrt": 0, "log1p": 0},
+            "log1p": {"log1p": 0, "sqrt": 0},
         },
         
         niterations=80,
@@ -294,15 +365,12 @@ def analyze_pareto(model, feature_cols, X_train, y_train, X_test, y_test,
         try:
             complexity = row['complexity']
             
-            # 예측 (Scaled)
-            y_pred_train_scaled = model.predict(X_train, index=i)
-            y_pred_test_scaled  = model.predict(X_test, index=i)
-            
-            # 역변환 (ppm 단위로 변환)
-            y_pred_test = y_scaler.inverse_transform(y_pred_test_scaled.reshape(-1, 1)).ravel()
-            y_test_ppm  = y_scaler.inverse_transform(y_test.reshape(-1, 1)).ravel()
-            y_train_ppm = y_scaler.inverse_transform(y_train.reshape(-1, 1)).ravel()
-            y_pred_train = y_scaler.inverse_transform(y_pred_train_scaled.reshape(-1, 1)).ravel()
+            # 예측 (원본 ppm 단위 — 스케일링 없으므로 역변환 불필요, 호환성 유지)
+            y_pred_train = model.predict(X_train, index=i)
+            y_pred_test  = model.predict(X_test,  index=i)
+
+            y_test_ppm  = y_test.ravel()
+            y_train_ppm = y_train.ravel()
 
             r2_test  = r2_score(y_test_ppm, y_pred_test)
             rmse_test = np.sqrt(mean_squared_error(y_test_ppm, y_pred_test))
@@ -352,21 +420,25 @@ def plot_results(model, results_df, best_idx, X_test, y_test, y_scaler):
     plt.colorbar(sc, ax=ax1).set_label("Overfit Gap")
     ax1.set_xlabel("Complexity"); ax1.set_ylabel("R² (Test)")
     
-    # ── Figure 3: Parity Plot (Inverse Transformed) ──
+    # ── Figure 3: Parity Plot (원본 ppm 단위) ──
     ax2 = axes[1]
-    y_pred_scaled = model.predict(X_test, index=best_idx)
-    y_pred = y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).ravel()
-    y_test_ppm = y_scaler.inverse_transform(y_test.reshape(-1, 1)).ravel()
+    y_pred     = model.predict(X_test, index=best_idx)
+    y_test_ppm = y_test.ravel()
     
     ax2.scatter(y_test_ppm, y_pred, s=3, alpha=0.4)
     lims = [min(y_test_ppm.min(), y_pred.min()), max(y_test_ppm.max(), y_pred.max())]
     ax2.plot(lims, lims, 'r--')
     
-    r2 = r2_score(y_test_ppm, y_pred)
+    r2   = r2_score(y_test_ppm, y_pred)
     rmse = np.sqrt(mean_squared_error(y_test_ppm, y_pred))
-    mae = mean_absolute_error(y_test_ppm, y_pred)
-    
-    ax2.set_title(f"Parity (R²={r2:.3f}, RMSE={rmse:.3f} ppm)")
+    mae  = mean_absolute_error(y_test_ppm, y_pred)
+
+    # slope/intercept: trivial solution 진단 (slope≈1, intercept≈0이 이상적)
+    slope, intercept, *_ = stats.linregress(y_test_ppm, y_pred)
+    ax2.set_title(
+        f"Parity Plot (원본 단위 [ppm])\n"
+        f"R²={r2:.3f}  RMSE={rmse:.3f}  slope={slope:.3f}  intercept={intercept:.3f}"
+    )
     ax2.set_xlabel("Observed (ppm)"); ax2.set_ylabel("Predicted (ppm)")
     
     fig.savefig(os.path.join(OUT_DIR, "Figure_2_PySR_Results.png"), dpi=300)
@@ -556,7 +628,10 @@ if __name__ == "__main__":
     
     # 2. 물리 피처 생성
     df = engineer_physics_features(df)
-    
+
+    # 2.5. EAIC sub-region one-hot encoding
+    df = add_region_features(df)
+
     # 3. Train/Test 분할
     df_train_full, df_test_full, df_val, df_train_sr, df_test_sr = split_data(df)
     

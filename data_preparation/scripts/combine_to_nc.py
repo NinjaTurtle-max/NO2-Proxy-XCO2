@@ -37,7 +37,7 @@ except ImportError:
 # ─────────────────────────────────────────────
 # 1. 경로 설정
 # ─────────────────────────────────────────────
-BASE_DIR            = "/mnt/e/dataset/XCO2연구 데이터"
+BASE_DIR            = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
 OUT_NC              = os.path.join(BASE_DIR, "integrated_dataset.nc")
 TROPOMI_CSV         = os.path.join(BASE_DIR, "tropomi_east_asia_sliced.csv")
 TROPOMI_PARQUET_DIR = os.path.join(BASE_DIR, "_tropomi_by_date")
@@ -73,7 +73,7 @@ KEEP_OCO_COLS: set | None = {
     "era5_u10", "era5_v10", "era5_blh",
     "era5_wind_speed", "era5_wind_dir",
     # 병합 추가 컬럼 (처리 중 생성)
-    "tropomi_no2", "population_density", "odiac_emission",
+    "tropomi_no2", "population_density", "odiac_emission", "file_source",
 }
 
 # ─────────────────────────────────────────────
@@ -371,6 +371,9 @@ def process_one_oco_file(args: tuple) -> str:
 
         # ── 로드: 필요한 컬럼만 읽어 메모리 절약 ──
         df = pd.read_csv(oco_path, usecols=usecols, low_memory=False)
+        df['file_source'] = fname.lower()  # 위성 출처 보존 (OCO-2/3 판별용)
+        if KEEP_OCO_COLS is not None:
+            KEEP_OCO_COLS.add('file_source')
 
         # float 'time' 컬럼 → 'tai_seconds'로 보존 (파싱 충돌 방지)
         if "time" in df.columns:
@@ -393,7 +396,7 @@ def process_one_oco_file(args: tuple) -> str:
 
         # 순수 문자열 object 컬럼 제거 (NC float 변수 호환 불가)
         str_cols = [c for c in df.select_dtypes("object").columns
-                    if c not in (time_col,)]
+                    if c not in (time_col, "file_source")]
         df.drop(columns=str_cols, inplace=True, errors="ignore")
 
         # ── TROPOMI + ERA5 매칭: 경량 coords_df(3컬럼)만 분리 전달 ──
@@ -478,6 +481,9 @@ def _init_netcdf(nc_path: str, col_union: list[str]) -> None:
                 ds.createVariable(col, "i8", ("obs",),
                                    zlib=True, complevel=4,
                                    fill_value=np.int64(-9999))
+            elif col == "file_source":
+                # 위성 파일명 보존용 문자열 변수 (NetCDF4 지원)
+                ds.createVariable(col, str, ("obs",), zlib=True)
             else:
                 ds.createVariable(col, "f4", ("obs",),
                                    zlib=True, complevel=4,
@@ -499,6 +505,8 @@ def _append_batch(nc_path: str, batch: pd.DataFrame) -> None:
             # sounding_id: int64 보존 (float32 변환 시 15자리 정밀도 손실)
             if col == "sounding_id":
                 ds[col][start:start + n] = vals.astype(np.int64)
+            elif col == "file_source":
+                ds[col][start:start + n] = vals.astype(object)
             else:
                 ds[col][start:start + n] = vals.astype(np.float32)
 
