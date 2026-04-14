@@ -21,10 +21,10 @@ FIG_OUT = os.path.join(OUT_DIR, "n_map_super_ops.png")
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# 격자 설정 (동아시아 0.1도)
+# 격자 설정 (동아시아 0.5도)
 LAT_MIN, LAT_MAX = 20.0, 50.0
 LON_MIN, LON_MAX = 100.0, 150.0
-RESOLUTION = 0.1
+RESOLUTION = 0.5
 
 lat_edges = np.arange(LAT_MIN, LAT_MAX + RESOLUTION, RESOLUTION)
 lon_edges = np.arange(LON_MIN, LON_MAX + RESOLUTION, RESOLUTION)
@@ -35,7 +35,7 @@ lon_centers = (lon_edges[:-1] + lon_edges[1:]) / 2
 # Vectorized Aggregation for Groupby
 # ─────────────────────────────────────────────────────────────────
 def perform_super_observation(df: pd.DataFrame) -> pd.DataFrame:
-    print("  [Aggregating] Grouping data by Date and 0.1 degree grid...")
+    print(f"  [Aggregating] Grouping data by Date and {RESOLUTION} degree grid...")
     
     # 1. 대상 변수 정의 (xco2_uncertainty는 별도 재산출하므로 제외)
     median_cols = ['xco2', 'tropomi_no2']
@@ -108,42 +108,81 @@ def perform_super_observation(df: pd.DataFrame) -> pd.DataFrame:
 # 위성 유형 판별 (OCO-2 vs OCO-3)
 # ─────────────────────────────────────────────────────────────────
 def detect_satellite(df: pd.DataFrame) -> pd.DataFrame:
-    """OCO-2 / OCO-3 판별 — sounding_id 패턴 기반 (가장 신뢰)
-    
-    OCO-2 sounding_id: 16자리, YYYYMMDDhhmmss + 2-digit footprint (2014.09~)
-    OCO-3 sounding_id: 16자리, 동일 형식이나 ISS 궤도 → tai_seconds 패턴 다름
-    
-    Lite product에서 가장 신뢰할 수 있는 판별: 파일명 또는 별도 metadata.
-    sounding_id 단독 판별이 어려우면 tai_seconds + latitude 패턴으로 보정.
+    """OCO-2 / OCO-3 판별 → satellite_id 컬럼 생성
+
+    satellite_id 값 정의:
+        0  = OCO-2
+        1  = OCO-3
+       -1  = Unknown (판별 불가 — 이후 satellite_id == -1 로 필터링 가능)
+
+    판별 우선순위:
+        1차) 'satellite' 컬럼 (가장 신뢰)
+        2차) 'file_source' 컬럼
+        3차) OCO-3 발사일(2019-08-06) + SAM 관측 모드 복합 판별
+        4차) 완전 판별 불가 → 전체 Unknown(-1)
     """
-    # 1차: 'satellite' 컬럼 (가장 명시적)
+    # 기본값: Unknown(-1)
+    satellite_id = pd.Series(-1, index=df.index, dtype=np.int8)
+
+    # 1차: 'satellite' 컬럼 직접 판별
     if 'satellite' in df.columns:
         sat_str = df['satellite'].astype(str).str.lower()
-        df['is_oco3'] = sat_str.str.contains(r'oco.?3', regex=True, na=False)
+        is_oco3 = sat_str.str.contains(r'oco.?3', regex=True, na=False)
+        is_oco2 = sat_str.str.contains(r'oco.?2', regex=True, na=False)
+        satellite_id[is_oco3] = 1
+        satellite_id[is_oco2 & ~is_oco3] = 0
         method = "'satellite' 컬럼 직접 판별"
-    
-    # 2차: combine_to_nc.py에서 file_source를 보존했다면
+
+    # 2차: 'file_source' 컬럼 기반
     elif 'file_source' in df.columns:
-        df['is_oco3'] = df['file_source'].astype(str).str.contains('oco3', case=False, na=False)
+        src_str = df['file_source'].astype(str).str.lower()
+        is_oco3 = src_str.str.contains('oco3', na=False)
+        is_oco2 = src_str.str.contains('oco2', na=False)
+        satellite_id[is_oco3] = 1
+        satellite_id[is_oco2 & ~is_oco3] = 0
         method = "'file_source' 컬럼 기반"
-    
-    # 3차: ⚠️ 판별 불가 — 보수적으로 전체 OCO-2 처리하되 명시적 경고
+
+    # 3차: OCO-3 발사일(2019-08-06) + SAM 관측 모드 복합 휴리스틱
+    elif 'time' in df.columns:
+        OCO3_LAUNCH = pd.Timestamp('2019-08-06')
+        after_launch = pd.to_datetime(df['time']) >= OCO3_LAUNCH
+        # 발사 이전 레코드는 확실히 OCO-2
+        satellite_id[~after_launch] = 0
+
+        if 'snd_operation_mode' in df.columns:
+            mode_str = df['snd_operation_mode'].astype(str).str.upper().str.strip()
+            # SAM(Target Acquisition Mode) — OCO-3 전용 모드 (문자 'SAM' 또는 정수 코드 3)
+            has_sam = mode_str.str.contains('SAM', na=False) | (mode_str == '3')
+            # 발사 이후 + SAM 확인 → OCO-3 확정
+            satellite_id[after_launch & has_sam] = 1
+            # 발사 이후 + SAM 없음 → OCO-2/OCO-3 혼재 가능 → Unknown 유지
+            method = "OCO-3 발사일(2019-08-06) + SAM 모드 복합 판별"
+        else:
+            # SAM 컬럼 없음: 발사 이후 레코드는 모두 Unknown 유지
+            method = "OCO-3 발사일(2019-08-06) 단독 (SAM 모드 정보 없음)"
+        print("  ℹ️  위성 식별 컬럼 없음 — 휴리스틱 판별 적용 (정확도 제한적)")
+        print("      SCI 투고 전 combine_to_nc.py 에서 'satellite'/'file_source' 보존 권장")
+
+    # 4차: 완전 판별 불가 → 전체 Unknown
     else:
-        df['is_oco3'] = False
-        method = "⚠️ 위성 식별 불가 — 전체를 OCO-2로 처리 (재실행 권장)"
-        print("  ⚠️⚠️⚠️ CRITICAL: combine_to_nc.py에서 'satellite' 또는 'file_source'")
-        print("       컬럼을 보존하지 않으면 OCO-2/OCO-3 분리가 불가능합니다.")
+        method = "⚠️ 완전 판별 불가 — 전체 Unknown(-1) 처리"
+        print("  ⚠️⚠️⚠️ CRITICAL: 위성 판별 가능한 컬럼(satellite, file_source, time) 없음")
         print("       SCI 투고 전 반드시 재처리하여 위성 출처를 보존하십시오.")
-    
+
+    df['satellite_id'] = satellite_id
+
     n_total = len(df)
-    n_oco2 = int((~df['is_oco3']).sum())
-    n_oco3 = int(df['is_oco3'].sum())
+    n_oco2  = int((satellite_id == 0).sum())
+    n_oco3  = int((satellite_id == 1).sum())
+    n_unk   = int((satellite_id == -1).sum())
+
     print(f"  [Satellite 판별] 방법: {method}")
     if n_total > 0:
-        print(f"  OCO-2: {n_oco2:,} 행 ({n_oco2/n_total*100:.1f}%)")
-        print(f"  OCO-3: {n_oco3:,} 행 ({n_oco3/n_total*100:.1f}%)")
-    else:
-        print(f"  OCO-2: {n_oco2:,} 행 | OCO-3: {n_oco3:,} 행")
+        print(f"  OCO-2   ( 0): {n_oco2:,} 행 ({n_oco2/n_total*100:.1f}%)")
+        print(f"  OCO-3   ( 1): {n_oco3:,} 행 ({n_oco3/n_total*100:.1f}%)")
+        print(f"  Unknown (-1): {n_unk:,} 행  ({n_unk/n_total*100:.1f}%)")
+    if n_unk > 0:
+        print(f"  ℹ️  Unknown {n_unk:,}행 — satellite_id == -1 로 이후 필터링 가능")
     return df
 
 
@@ -201,10 +240,10 @@ def run_super_observation():
     print(f"  [조건 B] (QF==0 & AOD<={AOD_THRESHOLD}): {n_aod:,} rows 보유율 ({(n_aod/len(df)*100):.1f}%)")
     print(f"  [AOD 임계값] {AOD_THRESHOLD} (Wunch et al. 2017 기준)")
     
-    # 0.5 대비 추가 확보 행수 계산
+    # 0.5 대비 추가 확보 행수 계산 (참고용)
     mask_aod_old = mask_qf & (df['ret_aod_total'] <= 0.5)
     n_extra = (mask_aod & ~mask_aod_old).sum()
-    print(f"  → 이전 0.5 대비 추가 보존 행: {n_extra:,} ({(n_extra/n_qf*100):.1f}%)")
+    print(f"  → 이전 기준(AOD<=0.5) 대비 추가 보존 행: {n_extra:,} ({(n_extra/n_qf*100):.1f}%)")
     
     # 강화된 B필터를 기본으로 모델링 수행
     df = df[mask_aod].copy()
@@ -213,9 +252,12 @@ def run_super_observation():
     # 위성 유형 판별 및 분리
     print("\n  [Satellite 분리]")
     df = detect_satellite(df)
-    df_oco3 = df[df['is_oco3']].drop(columns=['is_oco3']).copy()
-    df      = df[~df['is_oco3']].drop(columns=['is_oco3']).copy()
+    df_oco3    = df[df['satellite_id'] == 1].drop(columns=['satellite_id']).copy()
+    df_unknown = df[df['satellite_id'] == -1].drop(columns=['satellite_id']).copy()
+    df         = df[df['satellite_id'] == 0].drop(columns=['satellite_id']).copy()
     print(f"  이후 파이프라인: OCO-2 {len(df):,} 행 사용 / OCO-3 {len(df_oco3):,} 행 별도 저장")
+    if len(df_unknown) > 0:
+        print(f"  ℹ️  Unknown {len(df_unknown):,} 행 → 파이프라인에서 제외 (satellite_id == -1)")
 
     # 2. 운영 모드 (Operation Mode) 및 육상/해양 비중 검토
     if 'snd_operation_mode' in df.columns and 'snd_land_water_indicator' in df.columns:
@@ -322,6 +364,43 @@ def run_super_observation():
         print(f"  [Success] OCO-3 Super-obs 저장 완료!")
         print(f"  📍 파일 경로: {PARQUET_OCO3_OUT}")
         print(f"  📦 용량: {mb_oco3:.1f} MB | Shape: {agg_oco3.shape}")
+
+    # ── Validation Log ────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("STEP 6: Validation Log — OCO-2 vs OCO-3 비교 리포트")
+    print("=" * 60)
+
+    # OCO-2 통계
+    n_raw_oco2   = len(df)
+    n_grid_oco2  = agg_df[['lat_idx', 'lon_idx']].drop_duplicates().shape[0]
+    n_obs_oco2   = int(agg_df['n_soundings'].sum())
+
+    print(f"  {'항목':<30} {'OCO-2':>15} {'OCO-3':>15}")
+    print(f"  {'-'*60}")
+    print(f"  {'원본 샘플 수 (QC 후)':<30} {n_raw_oco2:>15,}", end="")
+
+    if len(df_oco3) > 0:
+        n_raw_oco3  = len(df_oco3)
+        n_grid_oco3 = agg_oco3[['lat_idx', 'lon_idx']].drop_duplicates().shape[0]
+        n_obs_oco3  = int(agg_oco3['n_soundings'].sum())
+        ratio_raw   = n_raw_oco3  / n_raw_oco2  * 100 if n_raw_oco2  > 0 else float('nan')
+        ratio_grid  = n_grid_oco3 / n_grid_oco2 * 100 if n_grid_oco2 > 0 else float('nan')
+        ratio_obs   = n_obs_oco3  / n_obs_oco2  * 100 if n_obs_oco2  > 0 else float('nan')
+
+        print(f" {n_raw_oco3:>15,}  (OCO-3/OCO-2 = {ratio_raw:.1f}%)")
+        print(f"  {'유효 격자 수 (unique grid)':<30} {n_grid_oco2:>15,} {n_grid_oco3:>15,}  (OCO-3/OCO-2 = {ratio_grid:.1f}%)")
+        print(f"  {'총 Super-obs 관측 수':<30} {n_obs_oco2:>15,} {n_obs_oco3:>15,}  (OCO-3/OCO-2 = {ratio_obs:.1f}%)")
+        print(f"  {'Super-obs 행 수':<30} {len(agg_df):>15,} {len(agg_oco3):>15,}")
+    else:
+        print(f"  {'유효 격자 수 (unique grid)':<30} {n_grid_oco2:>15,} {'N/A':>15}")
+        print(f"  {'총 Super-obs 관측 수':<30} {n_obs_oco2:>15,} {'N/A':>15}")
+        print(f"  {'Super-obs 행 수':<30} {len(agg_df):>15,} {'N/A':>15}")
+        print("  ℹ️  OCO-3 데이터 없음 — 위성 식별 컬럼 확인 필요")
+
+    if len(df_unknown) > 0:
+        print(f"\n  ⚠️  Unknown 레코드 {len(df_unknown):,} 행 집계에서 제외됨 (satellite_id == -1)")
+
+    print("=" * 60)
 
 
 if __name__ == "__main__":

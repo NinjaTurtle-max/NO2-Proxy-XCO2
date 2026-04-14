@@ -150,8 +150,9 @@ def get_oco_column_union(oco_files: list[str]) -> list[str]:
         all_cols.discard("time")
         all_cols.add("tai_seconds")
 
-    # 처리 중 추가 컬럼 (TROPOMI, ERA5, TIF)
-    all_cols.update(["tropomi_no2", "population_density", "odiac_emission"])
+    # 처리 중 추가 컬럼 (TROPOMI, ERA5, TIF, 위성 출처)
+    all_cols.update(["tropomi_no2", "population_density", "odiac_emission",
+                     "file_source"])  # Force: 항상 col_union에 포함
     all_cols.update(ERA5_COL_MAP.values())  # era5_u10, era5_v10, era5_blh, ...
     # 날짜 파싱용 date → 'time' (datetime)으로 교체
     all_cols.discard("date")
@@ -517,7 +518,8 @@ def write_parquet_to_nc(parquet_path: str, col_union: list[str],
     df = pd.read_parquet(parquet_path)
     for col in col_union:
         if col not in df.columns and col != "time":
-            df[col] = np.nan
+            # file_source는 문자열 변수 → 빈 문자열로 패딩 (np.nan 금지)
+            df[col] = "" if col == "file_source" else np.nan
 
     if is_first:
         _init_netcdf(OUT_NC, col_union)

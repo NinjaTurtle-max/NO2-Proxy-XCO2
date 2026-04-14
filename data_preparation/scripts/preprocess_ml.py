@@ -33,7 +33,7 @@ OUT_REPORT  = os.path.join(BASE_DIR, "qc_report.md")
 # tropomi_no2 단위: μmol/m² (컬럼 원명 no2_tvcd_umol)
 PHYSICAL_BOUNDS_RANGE = {
     "xco2":        (395.0, 430.0),   # ppm
-    "tropomi_no2": (0.0,   200.0),   # μmol/m² (극단 오염 + 음수 동시 제거)
+    "tropomi_no2": (-50.0, 200.0),  # μmol/m² (선행연구에 따라 음수 노이즈 허용)
 }
 PHYSICAL_BOUNDS_MIN = {
     "era5_blh":    0.0,   # > 0 (경계층 고도 음수는 모델 오류)
@@ -54,13 +54,6 @@ CORE_VARS = [
 #   'iqr'       : Q1 − factor·IQR ~ Q3 + factor·IQR
 OUTLIER_CONFIG = {
     "xco2":            ("sigma",     3),
-    "tropomi_no2":     ("log_sigma", 3),    # log-normal → 도시 고농도 보존
-    # era5_wind_speed: 이상치 제거 대상에서 제외
-    #   → 강풍(Gust)은 XCO2 희석의 핵심 물리 메커니즘이며,
-    #     대기 확산 방정식(Gaussian Plume Model)의 필수 파라미터.
-    #     기계적 3σ 절사 시 희석된 XCO2를 설명할 단서가 사라져
-    #     계통 오차(Systematic Bias)를 유발함.
-    "odiac_emission":  ("iqr",       3.0),  # right-skewed → 완화된 IQR
 }
 
 
@@ -186,8 +179,8 @@ def filter_quality_flags(df: pd.DataFrame) -> pd.DataFrame:
     # ── 2-3. ret_aod_total 극단치 마스킹 (>0.5: 극심한 에어로졸 오염) ──
     if "ret_aod_total" in df.columns:
         n_before = len(df)
-        df = df[df["ret_aod_total"].isna() | (df["ret_aod_total"] <= 0.5)].copy()
-        print(f"  ret_aod_total<=0.5    제거: {n_before-len(df):,}행")
+        df = df[df["ret_aod_total"].isna() | (df["ret_aod_total"] <= 0.7)].copy()
+        print(f"  ret_aod_total<=0.7    제거: {n_before-len(df):,}행")
 
     removed = before - len(df)
     print(f"  ── 총 제거: {removed:,}행  ({removed/before*100:.2f}%)")
@@ -253,7 +246,8 @@ def _outlier_mask_monthly(series: pd.Series, month_series: pd.Series,
             lo, hi = mu - factor * sd, mu + factor * sd
         elif method == "log_sigma":
             # log-normal 분포 변수에 적합: 도시/공단 고농도값 보존
-            log_sub = np.log1p(sub)
+            # 음수값(노이즈)이 포함된 경우 log 연산 오류 방지를 위해 최소값 시프트 또는 클리핑 적용
+            log_sub = np.log1p(np.maximum(sub, -0.9))
             mu, sd = log_sub.mean(), log_sub.std()
             lo = np.expm1(mu - factor * sd)  # log 역변환
             hi = np.expm1(mu + factor * sd)

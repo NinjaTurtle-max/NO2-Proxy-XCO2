@@ -25,7 +25,7 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 # Strict Constraints (Manual Hyperparameter Control)
 BATCH_SIZE = 4
-PATCH_SIZE = 64 # Reduced to 64 to stay within 4GB Apple Silicon buffer limits
+PATCH_SIZE = 32 # Adjusted to 32 to fit within the new 0.5 deg (60x100) grid
 SEQ_LEN = 14
 HIDDEN_DIMS = [32, 64, 32]
 INIT_LR = 1e-4
@@ -122,10 +122,10 @@ class LargeXCO2GridDataset(Dataset):
         self.is_train = is_train
         self.dates = sorted(self.df['time'].unique())
         
-        # Map lat/lon to 400x750 indices
-        self.df['lat_idx'] = ((self.df['latitude'] - 20.0) / 0.1).astype(int).clip(0, 399)
-        self.df['lon_idx'] = ((self.df['longitude'] - 100.0) / 0.1).astype(int).clip(0, 749)
-        self.grid_shape = (400, 750)
+        # Map lat/lon to 60x100 indices (0.5 deg resolution)
+        self.df['lat_idx'] = ((self.df['latitude'] - 20.0) / 0.5).astype(int).clip(0, 59)
+        self.df['lon_idx'] = ((self.df['longitude'] - 100.0) / 0.5).astype(int).clip(0, 99)
+        self.grid_shape = (60, 100)
 
     def __len__(self):
         return len(self.dates) - self.seq_len

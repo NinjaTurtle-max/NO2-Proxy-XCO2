@@ -25,9 +25,9 @@ PARQUET_OCO3_ANOM_OUT = os.path.join(OUT_DIR, "oco3_anom_1d.parquet")
 # ─── 격자 설정 ───
 LAT_MIN, LAT_MAX = 20.0, 50.0
 LON_MIN, LON_MAX = 100.0, 150.0
-RESOLUTION       = 0.1
+RESOLUTION       = 0.5
 MIN_OBS_CLIM     = 12   # 고유 관측 월(Year-Month) 기준
-MIN_OBS_YEAR     = 12   # 연간 최소 관측 일수(Days) 기준
+MIN_OBS_YEAR     = 5   # 연간 최소 관측 일수(Days) 기준
 
 lat_edges = np.arange(LAT_MIN, LAT_MAX + RESOLUTION, RESOLUTION)
 lon_edges = np.arange(LON_MIN, LON_MAX + RESOLUTION, RESOLUTION)

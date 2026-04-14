@@ -50,7 +50,7 @@ OCO3_VAL_PATH     = os.path.join(OUT_DIR, "oco3_validation_scaled.parquet")
 # 격자 설정
 LAT_MIN, LAT_MAX = 20.0, 50.0
 LON_MIN, LON_MAX = 100.0, 150.0
-RESOLUTION       = 0.1
+RESOLUTION       = 0.5
 
 lat_edges   = np.arange(LAT_MIN, LAT_MAX + RESOLUTION, RESOLUTION)
 lon_edges   = np.arange(LON_MIN, LON_MAX + RESOLUTION, RESOLUTION)
