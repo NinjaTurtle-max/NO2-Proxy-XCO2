@@ -12,9 +12,9 @@ import cartopy.feature as cfeature
 # ─────────────────────────────────────────────────────────────────
 # 환경 및 경로 설정
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
+BASE_DIR = "/mnt/e/dataset/XCO2연구 데이터"
 PARQUET_IN = os.path.join(BASE_DIR, "ml_ready_dataset.parquet")
-OUT_DIR = os.path.join(BASE_DIR, "anomaly_output")
+OUT_DIR = os.path.join(BASE_DIR, "01_super_obs_output")
 PARQUET_OUT     = os.path.join(OUT_DIR, "super_obs_dataset.parquet")
 PARQUET_OCO3_OUT = os.path.join(OUT_DIR, "oco3_super_obs_dataset.parquet")
 FIG_OUT = os.path.join(OUT_DIR, "n_map_super_ops.png")
@@ -198,7 +198,8 @@ def run_super_observation():
     cols = ['time', 'latitude', 'longitude', 'xco2', 'tropomi_no2',
             'era5_wind_speed', 'era5_blh', 'era5_u10', 'era5_v10',
             'xco2_quality_flag', 'ret_aod_total', 
-            'snd_operation_mode', 'snd_land_water_indicator']
+            'snd_operation_mode', 'snd_land_water_indicator',
+            'file_source', 'satellite']
     
     # 존재 유무를 확인하며 추가 컬럼 로드 (populate variables)
     df = pd.read_parquet(PARQUET_IN)

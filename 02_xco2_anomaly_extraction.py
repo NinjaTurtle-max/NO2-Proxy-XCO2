@@ -14,10 +14,12 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────
 # 경로 설정
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR         = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
-PARQUET_IN       = os.path.join(BASE_DIR, "anomaly_output/super_obs_dataset.parquet")
-PARQUET_OCO3_IN  = os.path.join(BASE_DIR, "anomaly_output/oco3_super_obs_dataset.parquet")
-OUT_DIR          = os.path.join(BASE_DIR, "anomaly_output")
+BASE_DIR         = "/mnt/e/dataset/XCO2연구 데이터"
+PARQUET_IN       = os.path.join(BASE_DIR, "01_super_obs_output/super_obs_dataset.parquet")
+PARQUET_OCO3_IN  = os.path.join(BASE_DIR, "01_super_obs_output/oco3_super_obs_dataset.parquet")
+OUT_DIR          = os.path.join(BASE_DIR, "02_anomaly_standard_output")
+os.makedirs(OUT_DIR, exist_ok=True)
+
 ZARR_OUT         = os.path.join(OUT_DIR, "refined_xco2_anom.zarr")
 FIG_OUT          = os.path.join(OUT_DIR, "anomaly_statistics.png")
 PARQUET_OCO3_ANOM_OUT = os.path.join(OUT_DIR, "oco3_anom_1d.parquet")

@@ -18,7 +18,7 @@ from tqdm import tqdm
 DEVICE = torch.device("mps")
 torch.set_default_dtype(torch.float32)
 
-BASE_DIR = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
+BASE_DIR = "/mnt/e/dataset/XCO2연구 데이터"
 PARQUET_IN = os.path.join(BASE_DIR, "ml_ready_dataset.parquet") 
 OUT_DIR = os.path.join(BASE_DIR, "m0_results_v2")
 os.makedirs(OUT_DIR, exist_ok=True)

@@ -24,7 +24,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────
 # 경로 설정
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR    = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
+BASE_DIR    = "/mnt/e/dataset/XCO2연구 데이터"
 NC_PATH     = os.path.join(BASE_DIR, "integrated_dataset.nc")
 OUT_PARQUET = os.path.join(BASE_DIR, "ml_ready_dataset.parquet")
 OUT_REPORT  = os.path.join(BASE_DIR, "qc_report.md")

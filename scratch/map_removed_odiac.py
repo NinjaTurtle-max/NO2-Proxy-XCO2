@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 # ─────────────────────────────────────────────────────────────────
 # 1. 경로 및 설정
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
+BASE_DIR = "/mnt/e/dataset/XCO2연구 데이터"
 NC_PATH  = os.path.join(BASE_DIR, "integrated_dataset.nc")
 OUT_FIG  = "odiac_removed_points_map.png"
 

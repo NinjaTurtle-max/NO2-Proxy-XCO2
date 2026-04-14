@@ -45,7 +45,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────
 # 0. 경로 및 상수
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR    = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
+BASE_DIR    = "/mnt/e/dataset/XCO2연구 데이터"
 # 02에서 climatology+yearly trend 제거된 anomaly 사용 (super_obs_dataset 아님)
 # split_indices_v2.json도 이 파일 기준으로 생성되었으므로 인덱스 정합성 보장
 PARQUET_IN  = os.path.join(BASE_DIR, "anomaly_output/anom_1d_balanced.parquet")

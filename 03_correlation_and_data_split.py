@@ -7,7 +7,7 @@ Spatial Correlation Map (Figure 1) & Advanced Data Split Pipeline
   3. Feature Scaling (Exp A / Exp B 분리 Scaler)
 
 실행:
-    conda run -n NO2_Proxy python correlation_and_split.py
+    conda run -n NO2_Proxy python 03_correlation_and_data_split.py
 """
 
 import os, json, warnings
@@ -29,22 +29,45 @@ try:
 except ImportError:
     HAS_CARTOPY = False
 
-plt.rcParams['font.family'] = 'AppleGothic'
+import matplotlib.font_manager as fm
+# 리눅스 시스템 폰트가 설치되어 있으나 캐시 문제로 못 찾을 수 있으므로 직접 등록
+font_path = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
+if os.path.exists(font_path):
+    fm.fontManager.addfont(font_path)
+    plt.rcParams['font.family'] = 'NanumGothic'
+else:
+    # 윈도우/맥/기본 설정
+    plt.rcParams['font.family'] = ['Malgun Gothic', 'AppleGothic', 'DejaVu Sans', 'sans-serif']
+
 plt.rcParams['axes.unicode_minus'] = False
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # ─────────────────────────────────────────────────────────────────
 # 경로 및 상수
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR   = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
-PARQUET_IN = os.path.join(BASE_DIR, "anomaly_output/anom_1d.parquet")
-OUT_DIR    = os.path.join(BASE_DIR, "anomaly_output")
+BASE_DIR        = "/mnt/e/dataset/XCO2연구 데이터"
+PARQUET_IN_STD  = os.path.join(BASE_DIR, "02_anomaly_standard_output/anom_1d.parquet")
+PARQUET_IN_EAIC = os.path.join(BASE_DIR, "02_anomaly_eaic_output/anom_1d_eaic.parquet")
+
+# [자동 감지] 표준 데이터가 없으면 EAIC 데이터를 로드
+if os.path.exists(PARQUET_IN_STD):
+    PARQUET_IN = PARQUET_IN_STD
+    ANOM_DIR   = os.path.join(BASE_DIR, "02_anomaly_standard_output")
+elif os.path.exists(PARQUET_IN_EAIC):
+    PARQUET_IN = PARQUET_IN_EAIC
+    ANOM_DIR   = os.path.join(BASE_DIR, "02_anomaly_eaic_output")
+else:
+    # 둘 다 없는 경우 (오류 방지용 기본값)
+    PARQUET_IN = PARQUET_IN_STD
+    ANOM_DIR   = os.path.join(BASE_DIR, "02_anomaly_standard_output")
+
+OUT_DIR    = os.path.join(BASE_DIR, "03_split_output")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 FIG1_PATH         = os.path.join(OUT_DIR, "Figure_1_Final.png")
 SPLIT_PATH        = os.path.join(OUT_DIR, "split_indices_v2.json")
 SCALER_PATH       = os.path.join(OUT_DIR, "scalers_v2.joblib")
-PARQUET_OCO3_ANOM = os.path.join(OUT_DIR, "oco3_anom_1d.parquet")
+PARQUET_OCO3_ANOM = os.path.join(ANOM_DIR, "oco3_anom_1d.parquet")
 OCO3_VAL_PATH     = os.path.join(OUT_DIR, "oco3_validation_scaled.parquet")
 
 # 격자 설정
@@ -90,6 +113,16 @@ def load_data() -> pd.DataFrame:
     df["year"] = df["date"].dt.year
     df["month"] = df["date"].dt.month
     df["year_month"] = df["date"].dt.to_period("M")
+
+    # ── [IndexError 방지] 격자 인덱스 재계산 ──
+    # 파일 내 인덱스가 예전 해상도(0.1도) 기준일 수 있으므로, 현재 스크립트 설정(RESOLUTION)으로 갱신
+    df["lat_idx"] = np.searchsorted(lat_edges, df["latitude"].values, side="right") - 1
+    df["lon_idx"] = np.searchsorted(lon_edges, df["longitude"].values, side="right") - 1
+
+    # 범위 밖 인덱스 제거 (안전 장치)
+    mask = (df["lat_idx"] >= 0) & (df["lat_idx"] < len(lat_centers)) & \
+           (df["lon_idx"] >= 0) & (df["lon_idx"] < len(lon_centers))
+    df = df[mask].reset_index(drop=True)
 
     # 경도 기반 EAIC sub-region 레이블 (stratified split용)
     df["eaic_region"] = "Other"
@@ -211,8 +244,8 @@ def plot_figure_1(r_map, n_map, sig_map) -> None:
     print("STEP 3: Figure 1 렌더링 (3-panel: Correlation / Density / N≥100 Filtered)")
     print("=" * 70)
 
-    # N≥30 필터 적용 r 맵 (중심극한정리 기반 현실적 임계값)
-    N_THRESH = 30
+    # N≥10 필터 적용 r 맵 (Spatial Balance에서 MAX_PER_GRID=15로 제한했으므로 임계값 하향)
+    N_THRESH = 10
     r_filtered = np.where(n_map >= N_THRESH, r_map, np.nan)
     n_filtered_grids = np.isfinite(r_filtered).sum()
     print(f"  N ≥ {N_THRESH} 격자 수 (c패널 표시 대상): {n_filtered_grids:,}")
@@ -270,7 +303,7 @@ def plot_figure_1(r_map, n_map, sig_map) -> None:
         shading="flat",
         transform=ccrs.PlateCarree() if HAS_CARTOPY else None
     )
-    ax2.set_title("(b) Observation Density (N per grid)\nOCO-2 궤도 sampling geometry 반영",
+    ax2.set_title("(b) Observation Density (N per grid)\nOCO-2/3 궤도 sampling geometry 반영",
                   fontsize=11, fontweight="bold")
     plt.colorbar(im2, ax=ax2, shrink=0.8, label="N (log scale)")
 
@@ -285,8 +318,8 @@ def plot_figure_1(r_map, n_map, sig_map) -> None:
     else:
         plt.colorbar(im3, ax=ax3, shrink=0.8, label="Pearson r", extend="both")
 
-    fig.suptitle("Figure 1. Spatial Correlation between TROPOMI NO₂ and OCO-2 XCO₂ Anomaly\n"
-                 "East Asia, 2020–2024, 0.1° × 0.1° Super-observations",
+    fig.suptitle("Figure 1. Spatial Correlation between TROPOMI NO₂ and OCO-2/3 XCO₂ Anomaly\n"
+                 "East Asia, 2020–2024, 0.5° × 0.5° Super-observations",
                  fontsize=13, fontweight="bold", y=1.02)
 
     plt.tight_layout()

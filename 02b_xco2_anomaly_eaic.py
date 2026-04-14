@@ -29,12 +29,16 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ──────────────────────────────────────────────────────────────
 # 경로
 # ──────────────────────────────────────────────────────────────
-BASE_DIR   = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
-PARQUET_IN = os.path.join(BASE_DIR, "anomaly_output/super_obs_dataset.parquet")
-OUT_DIR    = os.path.join(BASE_DIR, "anomaly_output")
+BASE_DIR   = "/mnt/e/dataset/XCO2연구 데이터"
+PARQUET_IN = os.path.join(BASE_DIR, "01_super_obs_output/super_obs_dataset.parquet")
+PARQUET_OCO3_IN = os.path.join(BASE_DIR, "01_super_obs_output/oco3_super_obs_dataset.parquet")
+OUT_DIR    = os.path.join(BASE_DIR, "02_anomaly_eaic_output")
+os.makedirs(OUT_DIR, exist_ok=True)
+
 PARQUET_OUT = os.path.join(OUT_DIR, "anom_1d_eaic.parquet")
 ZARR_OUT   = os.path.join(OUT_DIR, "refined_xco2_anom_eaic.zarr")
 FIG_OUT    = os.path.join(OUT_DIR, "anomaly_statistics_eaic.png")
+PARQUET_OCO3_ANOM_OUT = os.path.join(OUT_DIR, "oco3_anom_1d_eaic.parquet")
 
 # ──────────────────────────────────────────────────────────────
 # EAIC Sub-region 정의 (학술적 근거 인용 가능한 좌표)
@@ -61,12 +65,12 @@ EAIC_REGIONS = {
         "min_obs_year": 4,
         "description": "Pearl River Delta",
     },
-    "KCR": {  # Korean Capital Region — Seoul 광역
-        "lat": (36.5, 38.5),
-        "lon": (126.0, 128.0),
+    "KCR": {  # Korean Capital Region — Seoul 광역 (확장 범위)
+        "lat": (35.0, 38.5),
+        "lon": (125.0, 129.0),
         "min_obs_clim": 6,   # 한반도 관측 매우 sparse
         "min_obs_year": 3,
-        "description": "Korean Capital Region (Seoul Metropolitan)",
+        "description": "Expanded Korean Capital Region (including West Coast clusters)",
     },
     "JKT": {  # Japan Kanto — Tokyo 광역
         "lat": (34.5, 37.0),
@@ -367,14 +371,93 @@ def plot_qq(df: pd.DataFrame):
     print(f"  [저장] {FIG_OUT}")
 
 
-def export(df: pd.DataFrame):
+def export_to_zarr(df: pd.DataFrame, grid_clim: dict, grid_delta: dict):
     print("\n" + "=" * 70)
-    print("STEP 6: Export — Parquet (1D)")
+    print("STEP 6: 최종 Anomaly 큐브 Zarr Export (EAIC)")
     print("=" * 70)
     
-    df.to_parquet(PARQUET_OUT, index=False)
-    mb = os.path.getsize(PARQUET_OUT) / (1024 * 1024)
-    print(f"  [저장] {PARQUET_OUT} ({mb:.1f} MB, {df.shape})")
+    import xarray as xr
+    years = sorted(df["year"].unique())
+    months = np.arange(1, 13)
+    shape = (len(years), 12, len(lat_centers), len(lon_centers))
+    
+    anom_grid = np.full(shape, np.nan, dtype=np.float32)
+    obs_grid  = np.full(shape, np.nan, dtype=np.float32)
+
+    grp = df.groupby(["year", "month", "lat_idx", "lon_idx"]).agg(
+        anom_mean=("xco2_anomaly", "mean"),
+        obs_mean=("xco2", "mean")
+    ).reset_index()
+    
+    for _, row in grp.iterrows():
+        yi = years.index(int(row["year"]))
+        mi = int(row["month"]) - 1
+        li, lo = int(row["lat_idx"]), int(row["lon_idx"])
+        anom_grid[yi, mi, li, lo] = row["anom_mean"]
+        obs_grid[yi, mi, li, lo]  = row["obs_mean"]
+
+    ds = xr.Dataset(
+        {
+            "xco2_anomaly": (["year", "month", "lat", "lon"], anom_grid),
+            "xco2_obs":     (["year", "month", "lat", "lon"], obs_grid),
+        },
+        coords={
+            "year": years, "month": months, "lat": lat_centers, "lon": lon_centers
+        },
+        attrs={"title": "Refined XCO2 Anomaly (EAIC Masked)"}
+    )
+    
+    import shutil
+    if os.path.exists(ZARR_OUT): shutil.rmtree(ZARR_OUT)
+    ds.to_zarr(ZARR_OUT, mode="w")
+    print(f"  [성공] Zarr Export 완료: {ZARR_OUT}")
+
+
+def apply_hierarchical_climatology_to_oco3(grid_clim, region_clim, global_clim, grid_delta, region_delta):
+    print("\n" + "=" * 70)
+    print("STEP 7: OCO-3 독립 검증 (EAIC Hierarchical Baseline)")
+    print("=" * 70)
+
+    if not os.path.exists(PARQUET_OCO3_IN):
+        print(f"  ⚠️ OCO-3 super-obs 파일 없음 — 건너뜀")
+        return
+
+    df3 = pd.read_parquet(PARQUET_OCO3_IN)
+    df3['date'] = pd.to_datetime(df3['date'])
+    df3['year'] = df3['date'].dt.year
+    df3['month'] = df3['date'].dt.month
+    df3 = assign_eaic_region(df3)
+    df3 = df3[df3['eaic_region'] != 'OUT'].copy()
+
+    n = len(df3)
+    if n == 0:
+        print("  ⚠️ EAIC 영역 내 OCO-3 데이터 없음")
+        return
+
+    baseline_arr = np.full(n, np.nan, dtype=np.float32)
+    lat_i = df3['lat_idx'].values.astype(int)
+    lon_i = df3['lon_idx'].values.astype(int)
+    months = df3['month'].values.astype(int)
+    years = df3['year'].values.astype(int)
+    regions = df3['eaic_region'].values
+
+    print(f"  [Processing OCO-3] Applying Hierarchy to {n:,} rows...")
+    for i in range(n):
+        c_clim = grid_clim.get((lat_i[i], lon_i[i], months[i]), np.nan)
+        if not np.isfinite(c_clim): c_clim = region_clim.get((regions[i], months[i]), np.nan)
+        if not np.isfinite(c_clim): c_clim = global_clim.get(months[i], np.nan)
+        
+        dc = grid_delta.get((lat_i[i], lon_i[i], years[i]), np.nan)
+        if not np.isfinite(dc): dc = region_delta.get((regions[i], years[i]), 0.0)
+        
+        baseline_arr[i] = c_clim + dc
+
+    df3['xco2_baseline'] = baseline_arr
+    df3['xco2_anomaly'] = df3['xco2'].values - baseline_arr
+    df3 = df3.dropna(subset=['xco2_anomaly']).reset_index(drop=True)
+
+    df3.to_parquet(PARQUET_OCO3_ANOM_OUT, index=False)
+    print(f"  [저장] OCO-3 EAIC Anomaly: {PARQUET_OCO3_ANOM_OUT} ({len(df3):,} rows)")
 
 
 if __name__ == "__main__":
@@ -384,6 +467,12 @@ if __name__ == "__main__":
     df_anom = calculate_anomaly_hierarchical(df, grid_clim, region_clim, global_clim,
                                               grid_delta, region_delta)
     plot_qq(df_anom)
-    export(df_anom)
     
-    print("\n✅ EAIC 집중형 Anomaly 추출 완료")
+    # 추가된 기능 실행
+    export_to_zarr(df_anom, grid_clim, grid_delta)
+    apply_hierarchical_climatology_to_oco3(grid_clim, region_clim, global_clim, grid_delta, region_delta)
+    
+    # 기존 Parquet Export
+    df_anom.to_parquet(PARQUET_OUT, index=False)
+    print(f"\n  [최종 저장] {PARQUET_OUT} 완료")
+    print("\n✅ EAIC 집중형 Anomaly 추출 (Full-set) 완료")

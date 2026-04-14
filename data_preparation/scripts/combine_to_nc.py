@@ -37,7 +37,7 @@ except ImportError:
 # ─────────────────────────────────────────────
 # 1. 경로 설정
 # ─────────────────────────────────────────────
-BASE_DIR            = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
+BASE_DIR            = "/mnt/e/dataset/XCO2연구 데이터"
 OUT_NC              = os.path.join(BASE_DIR, "integrated_dataset.nc")
 TROPOMI_CSV         = os.path.join(BASE_DIR, "tropomi_east_asia_sliced.csv")
 TROPOMI_PARQUET_DIR = os.path.join(BASE_DIR, "_tropomi_by_date")
@@ -372,9 +372,7 @@ def process_one_oco_file(args: tuple) -> str:
 
         # ── 로드: 필요한 컬럼만 읽어 메모리 절약 ──
         df = pd.read_csv(oco_path, usecols=usecols, low_memory=False)
-        df['file_source'] = fname.lower()  # 위성 출처 보존 (OCO-2/3 판별용)
-        if KEEP_OCO_COLS is not None:
-            KEEP_OCO_COLS.add('file_source')
+        # [메모리 최적화] file_source는 여기서 추가하지 않고 NC 기록 직전에 추가함
 
         # float 'time' 컬럼 → 'tai_seconds'로 보존 (파싱 충돌 방지)
         if "time" in df.columns:
@@ -397,7 +395,7 @@ def process_one_oco_file(args: tuple) -> str:
 
         # 순수 문자열 object 컬럼 제거 (NC float 변수 호환 불가)
         str_cols = [c for c in df.select_dtypes("object").columns
-                    if c not in (time_col, "file_source")]
+                    if c not in (time_col,)]
         df.drop(columns=str_cols, inplace=True, errors="ignore")
 
         # ── TROPOMI + ERA5 매칭: 경량 coords_df(3컬럼)만 분리 전달 ──
@@ -451,7 +449,7 @@ def process_one_oco_file(args: tuple) -> str:
 
         df.to_parquet(out_parquet, engine="pyarrow", compression="zstd")
         mem_mb = df.memory_usage(deep=True).sum() / 1e6
-        print(f"  [완료] {fname}: {len(df):,}행 | {mem_mb:.1f}MB")
+        print(f"  [완료] {fname}")  # 로그 간소화
         return out_parquet
 
     except Exception as e:
@@ -500,15 +498,18 @@ def _append_batch(nc_path: str, batch: pd.DataFrame) -> None:
             if col == "time" or col not in ds.variables:
                 continue
             vals = batch[col].values
-            # 숫자형이 아닌 경우 강제 변환
-            if not np.issubdtype(vals.dtype, np.number):
-                vals = pd.to_numeric(pd.Series(vals), errors="coerce").values
-            # sounding_id: int64 보존 (float32 변환 시 15자리 정밀도 손실)
+
             if col == "sounding_id":
+                # sounding_id: int64 보존 (float32 변환 시 15자리 정밀도 손실)
                 ds[col][start:start + n] = vals.astype(np.int64)
             elif col == "file_source":
-                ds[col][start:start + n] = vals.astype(object)
+                # 문자열 데이터 처리 (NaN 발생 시 빈 문자열로 대체)
+                s_vals = pd.Series(vals).fillna("").astype(str).values
+                ds[col][start:start + n] = s_vals.astype(object)
             else:
+                # 숫자형이 아닌 경우 강제 변환
+                if not np.issubdtype(vals.dtype, np.number):
+                    vals = pd.to_numeric(pd.Series(vals), errors="coerce").values
                 ds[col][start:start + n] = vals.astype(np.float32)
 
 
@@ -516,10 +517,16 @@ def write_parquet_to_nc(parquet_path: str, col_union: list[str],
                          is_first: bool) -> None:
     """Parquet → NC_WRITE_BATCH 단위 append. 누락 컬럼은 NaN 패딩."""
     df = pd.read_parquet(parquet_path)
+    # file_source 컬럼 동적 추가 (메모리 절약형)
+    df["file_source"] = os.path.basename(parquet_path).replace(".parquet", ".csv").lower()
+
     for col in col_union:
         if col not in df.columns and col != "time":
             # file_source는 문자열 변수 → 빈 문자열로 패딩 (np.nan 금지)
-            df[col] = "" if col == "file_source" else np.nan
+            if col == "file_source":
+                df[col] = ""
+            else:
+                df[col] = np.nan
 
     if is_first:
         _init_netcdf(OUT_NC, col_union)
