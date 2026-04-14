@@ -30,7 +30,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────
 # 0. 경로 및 상수
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR    = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
+BASE_DIR    = "/mnt/e/dataset/XCO2연구 데이터"
 PARQUET_IN  = os.path.join(BASE_DIR, "ml_ready_dataset.parquet")
 OUT_DIR     = os.path.join(BASE_DIR, "anomaly_output_v2")
 os.makedirs(OUT_DIR, exist_ok=True)
