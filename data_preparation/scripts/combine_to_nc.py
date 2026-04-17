@@ -37,7 +37,7 @@ except ImportError:
 # ─────────────────────────────────────────────
 # 1. 경로 설정
 # ─────────────────────────────────────────────
-BASE_DIR            = "/mnt/e/dataset/XCO2연구 데이터"
+BASE_DIR            = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
 OUT_NC              = os.path.join(BASE_DIR, "integrated_dataset.nc")
 TROPOMI_CSV         = os.path.join(BASE_DIR, "tropomi_east_asia_sliced.csv")
 TROPOMI_PARQUET_DIR = os.path.join(BASE_DIR, "_tropomi_by_date")

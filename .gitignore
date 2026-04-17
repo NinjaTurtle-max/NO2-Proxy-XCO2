@@ -19,3 +19,8 @@ sr_*.csv
 pysr_*.csv
 hall_of_fame_*.csv
 *.log
+
+# CSV and Markdown rules
+*.csv
+*.md
+!README.md

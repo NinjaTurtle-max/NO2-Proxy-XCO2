@@ -49,17 +49,17 @@ BASE_DIR        = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
 PARQUET_IN_STD  = os.path.join(BASE_DIR, "02_anomaly_standard_output/anom_1d.parquet")
 PARQUET_IN_EAIC = os.path.join(BASE_DIR, "02_anomaly_eaic_output/anom_1d_eaic.parquet")
 
-# [자동 감지] 표준 데이터가 없으면 EAIC 데이터를 로드
-if os.path.exists(PARQUET_IN_STD):
-    PARQUET_IN = PARQUET_IN_STD
-    ANOM_DIR   = os.path.join(BASE_DIR, "02_anomaly_standard_output")
-elif os.path.exists(PARQUET_IN_EAIC):
+# [자동 감지] EAIC 데이터를 우선 로드 (Daily Zonal v3 적용됨)
+if os.path.exists(PARQUET_IN_EAIC):
     PARQUET_IN = PARQUET_IN_EAIC
     ANOM_DIR   = os.path.join(BASE_DIR, "02_anomaly_eaic_output")
-else:
-    # 둘 다 없는 경우 (오류 방지용 기본값)
+elif os.path.exists(PARQUET_IN_STD):
     PARQUET_IN = PARQUET_IN_STD
     ANOM_DIR   = os.path.join(BASE_DIR, "02_anomaly_standard_output")
+else:
+    # 둘 다 없는 경우 (오류 방지용 기본값)
+    PARQUET_IN = PARQUET_IN_EAIC
+    ANOM_DIR   = os.path.join(BASE_DIR, "02_anomaly_eaic_output")
 
 OUT_DIR    = os.path.join(BASE_DIR, "03_split_output")
 os.makedirs(OUT_DIR, exist_ok=True)

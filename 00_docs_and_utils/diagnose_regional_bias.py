@@ -12,7 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # ── 경로 ──
-BASE_DIR   = "/mnt/e/dataset/XCO2연구 데이터"
+BASE_DIR   = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
 PARQUET_IN = os.path.join(BASE_DIR, "anomaly_output/anom_1d.parquet")
 OUT_DIR    = os.path.join(BASE_DIR, "anomaly_output")
 
