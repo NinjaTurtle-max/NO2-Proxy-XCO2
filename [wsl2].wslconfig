@@ -1,5 +1,0 @@
-[wsl2]
-memory=48G
-swap=16GB
-# CPU 코어도 다 쓸 수 있게 설정합니다.
-processors=16
