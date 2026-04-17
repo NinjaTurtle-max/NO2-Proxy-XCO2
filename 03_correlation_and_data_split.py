@@ -45,7 +45,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ─────────────────────────────────────────────────────────────────
 # 경로 및 상수
 # ─────────────────────────────────────────────────────────────────
-BASE_DIR        = "/mnt/e/dataset/XCO2연구 데이터"
+BASE_DIR        = "/Volumes/100.118.65.89/dataset/XCO2연구 데이터"
 PARQUET_IN_STD  = os.path.join(BASE_DIR, "02_anomaly_standard_output/anom_1d.parquet")
 PARQUET_IN_EAIC = os.path.join(BASE_DIR, "02_anomaly_eaic_output/anom_1d_eaic.parquet")
 
@@ -113,6 +113,15 @@ def load_data() -> pd.DataFrame:
     df["year"] = df["date"].dt.year
     df["month"] = df["date"].dt.month
     df["year_month"] = df["date"].dt.to_period("M")
+    
+    # ── [필수] 0.5도 해상도에 맞춰 인덱스 강제 재계산 ──
+    # 구형 데이터(0.1도 등) 로드 시 IndexError 방지 및 현재 설정 동기화
+    df["lat_idx"] = np.floor((df.latitude  - LAT_MIN) / RESOLUTION).astype(int)
+    df["lon_idx"] = np.floor((df.longitude - LON_MIN) / RESOLUTION).astype(int)
+    
+    # 인덱스 범위 안전 가드 (Bounding Box 외곽 노이즈 제거)
+    df = df[(df.lat_idx >= 0) & (df.lat_idx < len(lat_centers)) &
+            (df.lon_idx >= 0) & (df.lon_idx < len(lon_centers))].copy()
 
     # ── [IndexError 방지] 격자 인덱스 재계산 ──
     # 파일 내 인덱스가 예전 해상도(0.1도) 기준일 수 있으므로, 현재 스크립트 설정(RESOLUTION)으로 갱신
