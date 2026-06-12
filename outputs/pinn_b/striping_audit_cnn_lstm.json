@@ -1,0 +1,21 @@
+{
+  "tag": "cnn_lstm",
+  "ckpt": "/Users/ganghyeon-u/Research/NO2-Proxy-XCO2/outputs/pinn_b/cnn_lstm/best.pt",
+  "gamma_at_111km": {
+    "E-W": 0.36385738973816234,
+    "N-S": 0.25101585934559506,
+    "NE-SW": 0.35573230852726023,
+    "NW-SE": 0.3026754700022995
+  },
+  "efold_range_km": {
+    "E-W": 64.01694004684146,
+    "N-S": 134.569735697946,
+    "NE-SW": 70.03066745376739,
+    "NW-SE": 109.42202973389954
+  },
+  "anisotropy_gamma_111km": 1.45,
+  "anisotropy_efold_range": 2.102,
+  "obs_baseline_anisotropy": 1.14,
+  "isotropy_threshold": 1.25,
+  "verdict": "ANISOTROPIC — 스와스 인공물 의심"
+}
