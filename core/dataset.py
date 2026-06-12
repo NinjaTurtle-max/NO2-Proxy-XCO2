@@ -21,7 +21,7 @@ NC → (B,T,C,H,W) 텐서 + obs_mask. 설계 근거 = docs/research_synthesis_de
   4. 시간 분할: train=2020-01~2022-12(36개월), val=2023(12개월). 2024 제외(dense 수송장 부재).
      val 샘플의 컨텍스트(t-2,t-1)가 2022 말을 포함하는 것은 입력 관측 재사용일 뿐 타겟 누수 아님.
 
-x_seq 채널 (C=11, 표준화는 train 기간 통계):
+x_seq 채널 (C=11 기본, 표준화는 train 기간 통계):
   0 y_in        타겟 이상장(부분마스킹된 관측, 결측=0) [ppm, 비표준화 — PDE와 단위 일치]
   1 in_mask     입력으로 준 관측 마스크 (0/1)
   2 no2_dense   NOₓ→NO₂ 등가 (표준화)
@@ -33,6 +33,13 @@ x_seq 채널 (C=11, 표준화는 train 기간 통계):
   8 div850      (표준화)
   9 sin_month
  10 cos_month
+
+lag_features=True 시 경향(1차 차분) 채널 4종 추가 (C=15, v4 스펙):
+ 11 d_u10       u10[τ]−u10[τ−1]   이류장 변동 (표준화)
+ 12 d_v10       v10[τ]−v10[τ−1]                (표준화)
+ 13 d_no2       no2[τ]−no2[τ−1]   배출 변동    (표준화)
+ 14 d_z500      z500[τ]−z500[τ−1] 종관 전환    (표준화)
+  └ τ=0(2020-01)은 이전 달 부재 → 0. 수송 인과성은 농도가 아닌 변화율에 실림.
 """
 from __future__ import annotations
 
@@ -55,6 +62,9 @@ N_CHANNELS = 11
 
 # 표준화 대상 채널 (y_in·in_mask·sin/cos 제외)
 _STD_VARS = ["no2_dense", "u10", "v10", "t2m", "ndvi", "z500", "div850"]
+# 경향(lag) 채널 원천 변수 — 프레임 간 1차 차분
+_LAG_VARS = ["u10", "v10", "no2_dense", "z500"]
+N_LAG_CHANNELS = len(_LAG_VARS)
 
 
 def _fill_spatial_median(arr: np.ndarray) -> np.ndarray:
@@ -104,9 +114,15 @@ def build_fields(verbose: bool = True) -> dict:
         "div850": tr["div850"].values.astype(np.float32),
     }
 
+    # ── 경향(1차 차분) 필드: τ=0은 이전 달 부재 → 0 ──
+    for k in _LAG_VARS:
+        d = np.zeros_like(fields[k])
+        d[1:] = fields[k][1:] - fields[k][:-1]
+        fields["d_" + k] = d
+
     # ── 표준화 파라미터 (train 기간만 — 누수 방지) ──
     norm = {}
-    for k in _STD_VARS:
+    for k in _STD_VARS + ["d_" + k for k in _LAG_VARS]:
         v = fields[k][:TRAIN_END]
         norm[k] = (float(np.nanmean(v)), float(np.nanstd(v) + 1e-8))
 
@@ -144,9 +160,11 @@ class XCO2ReconDataset(Dataset):
 
     def __init__(self, fields: dict, split: str = "train",
                  keep_lo: float = 0.3, keep_hi: float = 0.8,
-                 val_keep: float = 0.5, eval_full: bool = False, seed: int = 42):
+                 val_keep: float = 0.5, eval_full: bool = False, seed: int = 42,
+                 lag_features: bool = False):
         self.f = fields
         self.split = split
+        self.lag_features = lag_features
         self.keep_lo, self.keep_hi = keep_lo, keep_hi
         self.val_keep = val_keep
         self.eval_full = eval_full
@@ -194,14 +212,21 @@ class XCO2ReconDataset(Dataset):
                 ch.append(f[k][tau])  # 표준화는 아래 일괄 처리
             ch.append(np.full_like(y_in, np.sin(2 * np.pi * m / 12.0)))
             ch.append(np.full_like(y_in, np.cos(2 * np.pi * m / 12.0)))
+            if self.lag_features:  # 경향 채널은 말미 고정(기본 채널 인덱스 보존)
+                for k in _LAG_VARS:
+                    ch.append(f["d_" + k][tau])
             frames.append(np.stack(ch, 0))
             in_masks.append(im)
         x_seq = np.stack(frames, 0).astype(np.float32)  # (T,C,H,W)
 
-        # 표준화 (채널 2~8 = _STD_VARS)
+        # 표준화 (채널 2~8 = _STD_VARS, 11~14 = 경향 채널)
         for ci, k in enumerate(_STD_VARS, start=2):
             mu, sd = self.norm[k]
             x_seq[:, ci] = (x_seq[:, ci] - mu) / sd
+        if self.lag_features:
+            for ci, k in enumerate(["d_" + k for k in _LAG_VARS], start=N_CHANNELS):
+                mu, sd = self.norm[k]
+                x_seq[:, ci] = (x_seq[:, ci] - mu) / sd
 
         obs_t = f["obs_mask"][t]
         in_t = in_masks[-1]
@@ -232,12 +257,15 @@ class XCO2ReconDataset(Dataset):
         return self
 
 
-def make_datasets(seed: int = 42, verbose: bool = True):
+def make_datasets(seed: int = 42, verbose: bool = True, lag_features: bool = False):
     """fields 1회 로드 → (train_ds, val_hidden_ds, val_full_ds, meta)."""
     fields, meta = build_fields(verbose=verbose)
-    tr = XCO2ReconDataset(fields, "train", seed=seed).attach_norm(meta["norm"])
-    va = XCO2ReconDataset(fields, "val", seed=seed).attach_norm(meta["norm"])
-    va_full = XCO2ReconDataset(fields, "val", eval_full=True, seed=seed).attach_norm(meta["norm"])
+    kw = dict(seed=seed, lag_features=lag_features)
+    tr = XCO2ReconDataset(fields, "train", **kw).attach_norm(meta["norm"])
+    va = XCO2ReconDataset(fields, "val", **kw).attach_norm(meta["norm"])
+    va_full = XCO2ReconDataset(fields, "val", eval_full=True, **kw).attach_norm(meta["norm"])
+    meta["n_channels"] = N_CHANNELS + (N_LAG_CHANNELS if lag_features else 0)
+    meta["n_lag_channels"] = N_LAG_CHANNELS if lag_features else 0
     return tr, va, va_full, meta
 
 

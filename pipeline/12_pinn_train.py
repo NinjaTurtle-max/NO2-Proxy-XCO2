@@ -15,6 +15,8 @@ core/ARCHITECTURES 6종을 동일 조건으로 학습하고 재구성 R²를 변
 실행:
   python pipeline/12_pinn_train.py --arch mlp --epochs 60          # 단일
   python pipeline/12_pinn_train.py --arch all --epochs 60          # 6종 벤치마크
+  python pipeline/12_pinn_train.py --arch cnn_lstm_v4,unet_pconv_v4 \
+         --epochs 150 --lag_features --loss dynamic                # v4 상향판
 """
 from __future__ import annotations
 
@@ -31,9 +33,11 @@ from torch.utils.data import DataLoader
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from core import ARCHITECTURES                      # noqa: E402
-from core.dataset import make_datasets, N_CHANNELS, SEQ_LEN  # noqa: E402
+from core import ARCHITECTURES, V4_ARCHS            # noqa: E402
+from core.dataset import make_datasets, SEQ_LEN     # noqa: E402
 from core.losses import PIConvLSTMLoss, CurriculumScheduler  # noqa: E402
+from core.losses_adaptive import (                  # noqa: E402
+    DynamicPhysicsWeighter, TrivialEscapeRegularizer)
 
 OUT_DIR = ROOT / "outputs" / "pinn_b"
 DT_MONTH = 86400.0 * 30.44                          # 월 평균 초 (PDE dt)
@@ -88,14 +92,25 @@ def train_one(arch: str, args, datasets) -> dict:
     vl = DataLoader(va_ds, batch_size=args.batch, num_workers=0)
     vl_full = DataLoader(va_full_ds, batch_size=args.batch, num_workers=0)
 
-    model = ARCHITECTURES[arch](in_channels=N_CHANNELS, time_steps=SEQ_LEN,
-                                hidden=args.hidden).to(device)
+    arch_kw = {}
+    if arch in V4_ARCHS:
+        arch_kw["lag_channels"] = meta.get("n_lag_channels", 0)
+    model = ARCHITECTURES[arch](in_channels=meta["n_channels"], time_steps=SEQ_LEN,
+                                hidden=args.hidden, **arch_kw).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"\n━━ [{arch}] params={n_params/1e3:.0f}k device={device} ━━")
+    print(f"\n━━ [{arch}] params={n_params/1e3:.0f}k device={device} "
+          f"loss={args.loss} lag={meta.get('n_lag_channels', 0)} ━━")
 
     criterion = PIConvLSTMLoss().to(device)
     sched = CurriculumScheduler(total_epochs=args.epochs,
                                 lambda_pde_max=args.lambda_pde, beta_0=args.beta0)
+    # 동적 모드: λ_pde를 그래디언트-노름 균형 스케줄러가 대체(F3 이중제어 방지),
+    # anti-mean은 분산하한과 통합된 TrivialEscapeRegularizer로 일원화
+    weighter = regularizer = None
+    if args.loss == "dynamic":
+        weighter = DynamicPhysicsWeighter(total_epochs=args.epochs, rho=args.rho)
+        regularizer = TrivialEscapeRegularizer(
+            w_anti_mean=args.anti_mean, w_var_floor=args.var_floor).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
 
     out = OUT_DIR / arch
@@ -106,32 +121,40 @@ def train_one(arch: str, args, datasets) -> dict:
 
     for ep in range(args.epochs):
         sched.apply_curriculum(model, ep)               # Phase1: PDE 파라미터 동결
-        lambdas = sched.get_lambdas(ep)
+        lambdas = weighter.get_lambdas(ep) if weighter else sched.get_lambdas(ep)
         beta_t = sched.get_beta(ep)
 
         model.train()
         ep_loss, n_batch = 0.0, 0
-        for batch in tl:
+        for bi, batch in enumerate(tl):
             b, c_hat, log_var, pde_res, s_anthro, gate = forward_batch(model, batch, device)
             total, ld = criterion(
                 pred=c_hat, target=b["target"], log_var=log_var,
                 obs_mask=b["obs_mask"], pde_residual=pde_res,
                 lambdas=lambdas, s_anthro=s_anthro, beta_t=beta_t, sr_gate=gate,
             )
-            total = total + args.anti_mean * model.anti_mean_penalty(c_hat)
+            if weighter is not None:
+                if bi == 0:                              # 그래디언트 노름비 측정(backward 전)
+                    weighter.observe(model, ld["data_tensor"], ld["pde_tensor"])
+                total = total + regularizer(c_hat, b["target"], b["obs_mask"])
+            else:
+                total = total + args.anti_mean * model.anti_mean_penalty(c_hat)
             opt.zero_grad(set_to_none=True)
             total.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             ep_loss += float(total.detach())
             n_batch += 1
+        if weighter is not None:
+            weighter.update()
 
         hid_r2, hid_rmse, _ = evaluate(model, vl, device, "hidden_mask")
         full_r2, full_rmse, _ = evaluate(model, vl_full, device, "obs_mask")
         history.append({"epoch": ep, "phase": sched.get_phase(ep),
                         "loss": ep_loss / max(n_batch, 1),
                         "hidden_r2": hid_r2, "full_r2": full_r2,
-                        "beta": float(model.beta.detach())})
+                        "beta": float(model.beta.detach()),
+                        "lambda_pde": float(lambdas["pde"])})
 
         if hid_r2 > best["hidden_r2"]:
             best = {"hidden_r2": hid_r2, "hidden_rmse": hid_rmse,
@@ -175,10 +198,19 @@ def main():
     ap.add_argument("--patience", type=int, default=15)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--device", default="auto")
+    # ── v4 옵션 ──
+    ap.add_argument("--lag_features", action="store_true",
+                    help="경향(1차 차분) 채널 4종 추가 (C=11→15)")
+    ap.add_argument("--loss", choices=["legacy", "dynamic"], default="legacy",
+                    help="dynamic = 그래디언트-노름 균형 λ_pde + 분산하한 정규화")
+    ap.add_argument("--rho", type=float, default=0.9, help="동적 λ_pde EMA 댐핑 계수")
+    ap.add_argument("--var_floor", type=float, default=0.1, help="분산 하한 페널티 가중치")
     args = ap.parse_args()
 
-    archs = list(ARCHITECTURES) if args.arch == "all" else args.arch.split(",")
-    datasets = make_datasets(seed=args.seed)
+    # 'all' = 기존 6종 벤치마크 (v4는 명시 지정 시에만 — 비교 기준 보존)
+    archs = ([a for a in ARCHITECTURES if a not in V4_ARCHS]
+             if args.arch == "all" else args.arch.split(","))
+    datasets = make_datasets(seed=args.seed, lag_features=args.lag_features)
 
     results = {}
     for a in archs:

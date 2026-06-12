@@ -21,8 +21,14 @@ from .arch_cnn_lstm import CNNLSTMPINN
 from .arch_cnn3d import CNN3DPINN
 from .arch_unet_pconv import UNetPConvPINN
 from .arch_mlp import MLPPINN
+from .arch_cnn_lstm_v4 import CNNLSTMv4PINN
+from .arch_unet_pconv_v4 import UNetPConvV4PINN
 
 ARCHITECTURES = {
     "str": STRPINN, "convlstm_attn": ConvLSTMAttnPINN, "cnn_lstm": CNNLSTMPINN,
     "cnn3d": CNN3DPINN, "unet_pconv": UNetPConvPINN, "mlp": MLPPINN,
+    "cnn_lstm_v4": CNNLSTMv4PINN, "unet_pconv_v4": UNetPConvV4PINN,
 }
+
+# v4 아키텍처: lag_channels kwarg 수용 (경향 채널 게이트/스트림 분리)
+V4_ARCHS = {"cnn_lstm_v4", "unet_pconv_v4"}

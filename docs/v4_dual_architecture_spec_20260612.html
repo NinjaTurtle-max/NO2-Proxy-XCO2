@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>v4 이중 아키텍처 고도화 스펙 — CNN-LSTM &amp; UNet-PConv PINN (2026-06-12)</title>
+<style>
+  :root {
+    --ink: #1a1a2e; --muted: #5a5a72; --line: #d8d8e4;
+    --accent: #0f4c81; --warn: #b3541e; --ok: #2e6e4e; --bg-soft: #f5f6fa;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+         color: var(--ink); max-width: 980px; margin: 0 auto; padding: 2rem 1.2rem 4rem;
+         line-height: 1.65; }
+  h1 { font-size: 1.55rem; border-bottom: 3px solid var(--accent); padding-bottom: .5rem; }
+  h2 { font-size: 1.2rem; color: var(--accent); margin-top: 2.2rem;
+       border-left: 5px solid var(--accent); padding-left: .6rem; }
+  h3 { font-size: 1.02rem; margin-top: 1.4rem; }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .88rem; }
+  th, td { border: 1px solid var(--line); padding: .42rem .55rem; text-align: left;
+           vertical-align: top; }
+  th { background: var(--bg-soft); }
+  code, .mono { font-family: "SF Mono", Menlo, monospace; font-size: .85em;
+                background: var(--bg-soft); padding: .08em .3em; border-radius: 3px; }
+  .formula { background: var(--bg-soft); border: 1px solid var(--line); border-radius: 6px;
+             padding: .8rem 1rem; font-family: "STIX Two Math", "Times New Roman", serif;
+             font-size: 1.04rem; margin: .7rem 0; overflow-x: auto; }
+  .verdict-no { color: var(--warn); font-weight: 700; }
+  .verdict-ok { color: var(--ok); font-weight: 700; }
+  .note { background: #fdf6ec; border-left: 4px solid var(--warn); padding: .6rem .9rem;
+          margin: .8rem 0; font-size: .9rem; }
+  .meta { color: var(--muted); font-size: .85rem; }
+  ul { padding-left: 1.3rem; }
+  li { margin: .25rem 0; }
+</style>
+</head>
+<body>
+
+<h1>v4 이중 아키텍처 고도화 스펙<br>
+<span style="font-size:.75em; font-weight:400;">CNN-LSTM &amp; UNet-PConv PINN — 천장(R²=0.70) 스퀴징</span></h1>
+<p class="meta">2026-06-12 · NO2-Proxy-XCO2 길 B(XCO₂ 이상장 재구성) ·
+선행: 6종 벤치마크(커밋 <code>5e0cbe4</code>·<code>052d578</code>), 시드 스터디(<code>634e63a</code>)</p>
+
+<h2>0. 배경 — 왜 두 모델 모두인가</h2>
+<p>시드 스터디(42·123·7, 150ep) 결과 <b>cnn_lstm 0.6158±0.0050</b> vs
+<b>unet_pconv 0.6140±0.0040</b> — 평균 차이(+0.0018)가 시드 표준편차보다 작은
+<b>통계적 동률</b>. 한쪽을 취사선택하는 대신 두 아키텍처를 모두 고도화하여 벤치마크의
+복합 신뢰성을 확보한다. 목표는 변동도 천장 R²=0.7035(현재 도달률 ~88%)와의 잔여 격차
+~0.09의 축소.</p>
+
+<h2>1. 전제 사실 검증 (지시문 ↔ 코드베이스 대조)</h2>
+<table>
+<tr><th>지시문 전제</th><th>실측 근거</th><th>판정</th></tr>
+<tr>
+  <td>"53 km(2격자) 베리오그램 Range"</td>
+  <td>e-folding range = 4.84° = <b>537 km = 19.35격자</b>, 유효 range 1,611 km = 58격자
+      (<code>data/variogram/variogram_results.json</code>)</td>
+  <td class="verdict-no">오류 — 격자 해상도(0.25°≈27.8 km)×2를 range로 혼동.
+      실제 시사점은 정반대: 수용영역을 19~58격자로 확장해야 함</td>
+</tr>
+<tr>
+  <td>천장 R² = 0.707</td>
+  <td><code>r2_ceiling = 0.7035</code> (동 파일 <code>pinn_ceiling</code>)</td>
+  <td class="verdict-ok">반올림 오차 — 0.70 사용</td>
+</tr>
+<tr>
+  <td>"t−1, t−2 프레임의 BLH" 시차 피처</td>
+  <td>BLH는 데이터셋 채널 11종에 부재(<code>core/dataset.py</code>),
+      <code>12_pinn_train.py</code>에서 <code>blh=None</code> 하드코딩.
+      SEQ_LEN=3이라 t−2~t 원시 프레임은 이미 입력됨</td>
+  <td class="verdict-no">부분 기각 — BLH는 ERA5 추가 페치 필요(2차 과제).
+      구현 가능한 본질 = <b>프레임 간 1차 차분(경향) 채널</b></td>
+</tr>
+<tr>
+  <td>"하이드로포빅 노이즈"</td>
+  <td>대기과학·ML 양쪽에 없는 용어</td>
+  <td class="verdict-no">경향 채널의 고주파 잡음 과적합으로 해석하여 대응</td>
+</tr>
+<tr>
+  <td>동적 손실 가중치 "신규" 도입</td>
+  <td>이미 3계층 존재: CurriculumScheduler(에폭 램프) + AdaptivePhysicsLoss(SNR 픽셀
+      가중) + EMA 스케일 정규화. 과거 F3 버그 = 내부×커리큘럼 <b>이중 곱셈</b>으로
+      PDE 가중 1/10 소멸</td>
+  <td class="verdict-no">추가가 아니라 커리큘럼 λ_pde 값을 <b>대체</b>하는
+      단일 경로로 설계 (이중 제어 금지)</td>
+</tr>
+<tr>
+  <td>"β_pde 공간평균 편법수렴 방지 항 신규 작성"</td>
+  <td><code>base_pinn.anti_mean_penalty</code>가 이미 존재·사용 중(가중 0.01)</td>
+  <td class="verdict-ok">신규 정규화 클래스로 흡수·강화 (중복 부과 금지)</td>
+</tr>
+<tr>
+  <td>파일 위치 <code>Research/models/</code></td>
+  <td>프로젝트 규약 = <code>core/</code> + <code>ARCHITECTURES</code> 레지스트리 +
+      <code>12_pinn_train.py</code> 단일 벤치마크 하니스</td>
+  <td class="verdict-no"><code>core/arch_*_v4.py</code>로 배치 — 기존 6종과
+      동일 조건 비교 가능성 유지</td>
+</tr>
+</table>
+
+<h2>2. 아키텍처별 상향 스펙</h2>
+
+<h3>2-A. CNN-LSTM v4 — <code>core/arch_cnn_lstm_v4.py</code></h3>
+<table>
+<tr><th>요소</th><th>설계</th><th>근거</th></tr>
+<tr><td>경향(lag) 채널</td>
+    <td>Δu₁₀, Δv₁₀, ΔNO₂, Δz500 — 프레임 간 1차 차분 4종, C: 11→15
+        (<code>dataset.py --lag_features</code>, 두 모델 공용)</td>
+    <td><b>[대기화학]</b> 수송 인과성은 농도가 아닌 변화율에 실림
+        (이류장 변동·배출 변동·종관 전환)</td></tr>
+<tr><td>은닉상태 정규화</td>
+    <td>ConvGRU 게이트·후보 전활성에 GroupNorm(8) + recurrent zoneout p=0.1
+        + 경향 채널 전용 1×1 시그모이드 게이트(초기 0.5)</td>
+    <td><b>[PIML]</b> 분산 큰 경향 채널의 고주파 잡음 과적합 억제.
+        배치 4 → BatchNorm 불가, GroupNorm으로 프레임 통계 독립</td></tr>
+<tr><td>수용영역 확장</td>
+    <td>CNN 블록 2·3에 dilation 2·4 → RF 13격자 → <b>31격자</b> (파라미터 증가 0)</td>
+    <td><b>[지구통계]</b> e-folding range 19.35격자의 1.6배 확보</td></tr>
+</table>
+
+<h3>2-B. UNet-PConv v4 — <code>core/arch_unet_pconv_v4.py</code></h3>
+<table>
+<tr><th>요소</th><th>설계</th><th>근거</th></tr>
+<tr><td><b>이중 스트림 (최대 기대 이득)</b></td>
+    <td>희소 스트림(y_in·in_mask → PConv) ∥ 밀집 스트림(물리장·계절·경향 → 일반
+        Conv), 인코더 4단계 각각에서 융합 + 신뢰도 마스크 채널 공급</td>
+    <td><b>[PIML]</b> v5는 <code>x*m</code>으로 어디서나 유효한 dense 물리장까지
+        관측마스크로 0이 되는 구조적 정보 손실. <b>[대기화학]</b> NO₂ 배출 코어가
+        dense 스트림으로 분리되어 마스크 갱신과 무관하게 구조적으로 보존</td></tr>
+<tr><td>첫 희소 블록</td>
+    <td>k=5 + <b>분수 마스크 갱신</b>(이진 msum&gt;0 대신 m′=msum/slide 연속 신뢰도)</td>
+    <td><b>[지구통계]</b> 경계 신뢰도 보존으로 핫스팟 스미어링 억제
+        (±2격자 ≈ 55 km 국지 문맥)</td></tr>
+<tr><td>인코더 심도</td>
+    <td>3단 다운샘플(H/2·H/4·H/8) — 보틀넥 H/8=15에서 3×3이 원해상도 24격자 커버</td>
+    <td><b>[지구통계]</b> 유효 range 58격자 대응, 전체 RF가 range 상회</td></tr>
+</table>
+
+<h2>3. 공통 동적 물리 손실 가중치 — <code>core/losses_adaptive.py</code></h2>
+<p>그래디언트-노름 균형 + EMA 댐핑. 에폭 e에서:</p>
+<div class="formula">
+λ̂<sub>e</sub> = ḡ<sub>data</sub> / (ḡ<sub>pde</sub> + ε),&nbsp;&nbsp;
+ḡ<sub>•</sub> = (1/N<sub>e</sub>) Σ<sub>batch</sub> ‖∇<sub>θ<sub>enc</sub></sub> L<sub>•</sub>‖₂
+<br><br>
+λ<sub>pde</sub><sup>(e)</sup> = clip( ρ·λ<sub>pde</sub><sup>(e−1)</sup> + (1−ρ)·λ̂<sub>e</sub>,
+[0.05, 5.0] ) · r(e)
+</div>
+<ul>
+<li><b>댐핑 계수 ρ = 0.9</b>: 시간상수 τ = 1/(1−ρ) = 10 epoch — Phase 2 길이
+    (150ep 기준 45 epoch)의 ~1/4. 배치 노이즈(epoch당 9 스텝)는 평활, phase 전환은 추적.</li>
+<li>r(e) = 기존 커리큘럼 램프(P1: 0.05 고정, P2: 0→1 선형, P3: 1).
+    CurriculumScheduler의 <code>lambdas['pde']</code> 절대값을 본 스케줄러 출력으로
+    <b>대체</b> — F3 전례(이중 곱셈) 방지.</li>
+<li>clip 하한 0.05 = P1 최소 물리 제약 유지, 상한 5.0 = EMA 스케일 정규화 결합 시 발산 방지.</li>
+<li>AdaptivePhysicsLoss의 SNR 픽셀 가중 = <b>분포</b>(어디에), 본 스케줄러 = <b>전역
+    스케일</b>(얼마나) — 직교라 병존.</li>
+<li><b>Trivial Escape 차단</b> (TrivialEscapeRegularizer로 일원화):
+<div class="formula">
+L<sub>esc</sub> = w<sub>am</sub>·(−log σ²<sub>pred</sub>)
++ w<sub>vf</sub>·E[ max(0, 1 − σ<sub>pred</sub>/σ<sub>target</sub>)² ]
+</div>
+첫 항 = 기존 anti-mean과 동일식(흡수, 중복 부과 금지), 둘째 항 = 분산 하한 —
+예측장 표준편차가 관측 타겟 표준편차에 못 미치면 직접 벌점.</li>
+</ul>
+
+<h2>4. 산출 파일 및 하이퍼파라미터 최적화</h2>
+<table>
+<tr><th>파일</th><th>내용</th></tr>
+<tr><td><code>core/arch_cnn_lstm_v4.py</code></td>
+    <td>dilated CNN + GroupNorm-ConvGRU + zoneout + 경향 게이트.
+        <code>ARCHITECTURES["cnn_lstm_v4"]</code>, forward 계약 유지 (323k params)</td></tr>
+<tr><td><code>core/arch_unet_pconv_v4.py</code></td>
+    <td>이중 스트림 + 분수마스크 k=5 + 3단 U-Net.
+        <code>ARCHITECTURES["unet_pconv_v4"]</code> (351k params)</td></tr>
+<tr><td><code>core/losses_adaptive.py</code></td>
+    <td>DynamicPhysicsWeighter(§3 수식) + TrivialEscapeRegularizer</td></tr>
+<tr><td><code>core/dataset.py</code></td>
+    <td><code>lag_features=True</code> 옵션 — 경향 채널 4종(C=15), train 통계 표준화,
+        기본 채널 인덱스 보존(말미 추가). 기본값 off로 기존 재현성 보존</td></tr>
+<tr><td><code>pipeline/12_pinn_train.py</code></td>
+    <td><code>--lag_features --loss dynamic --rho --var_floor</code> 플래그.
+        <code>--arch all</code>은 기존 6종 유지(v4는 명시 지정)</td></tr>
+<tr><td><code>pipeline/13_hpo_v4.py</code></td>
+    <td>HPO 하니스 (아래)</td></tr>
+</table>
+
+<h3>HPO 설계 (<code>pipeline/13_hpo_v4.py</code>)</h3>
+<ul>
+<li><b>Stage 1 스크리닝 (60ep)</b>: 아키 2종 × 설정 8종 —
+    base(lr 3e-4·hidden 64·ρ 0.9·w<sub>vf</sub> 0.1·dynamic·lag on) /
+    lr 1e-3 / lr 1e-4 / hidden 96 / ρ 0.95 / w<sub>vf</sub> 0.3 /
+    <b>절제 ① legacy 손실</b> / <b>절제 ② lag off</b>.
+    절제 2종이 v4 신규 요소의 기여를 분리.</li>
+<li><b>Stage 2 확증 (150ep × seeds 42·123·7)</b>: 아키별 stage 1 최고 설정.
+    시드 규약은 기존 시드 스터디와 동일 → v3 결과(0.616/0.614)와 직접 비교 가능.</li>
+<li>산출: <code>outputs/pinn_b_v4/hpo_results.json</code>. 판단 기준 = hidden R²
+    (50% 숨김 gap-filling — 1차 지표; full R²는 입력 복사 성향 진단용 보조).</li>
+</ul>
+
+<h2>5. 검증 상태</h2>
+<ul>
+<li class="verdict-ok">스모크 테스트 통과 — 두 v4 모델 forward/backward 차원·그래디언트
+    정상(323k/351k params), 동적 가중치 observe/update 작동, zoneout 결정론 eval 경로 확인,
+    legacy 경로 회귀 무영향.</li>
+<li>HPO 결과는 완료 후 본 문서 §6에 추가 예정.</li>
+</ul>
+
+<p class="meta">작성: Claude (Fable 5) · 검증 데이터: val 2023 hidden-pixel R², 변동도 천장 0.7035</p>
+</body>
+</html>
