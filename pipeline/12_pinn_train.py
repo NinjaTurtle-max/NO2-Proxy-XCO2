@@ -141,7 +141,9 @@ def train_one(arch: str, args, datasets) -> dict:
                        out / "best.pt")
             patience = 0
         else:
-            patience += 1
+            # 조기종료는 P3에서만 누적 — Phase 경계가 total_epochs 비례라서
+            # epochs를 늘리면 P1이 길어져 PDE 도입(P2) 전에 patience가 소진됨
+            patience += 1 if sched.get_phase(ep) == 3 else 0
 
         if ep % 5 == 0 or patience == 0:
             print(f"  ep{ep:3d} P{sched.get_phase(ep)} loss={ep_loss/max(n_batch,1):8.3f} "
