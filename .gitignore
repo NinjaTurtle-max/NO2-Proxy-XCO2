@@ -9,6 +9,7 @@
 
 # Directories
 archive/
+data/
 DATA_process/
 __pycache__/
 .ipynb_checkpoints/
