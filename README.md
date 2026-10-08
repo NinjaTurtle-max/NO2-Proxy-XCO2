@@ -39,7 +39,7 @@ docs/       references.md · results/ · nas_inventory · nas_cleanup 스크립�
 archive/    이전 설계 스크립트·정정 전 산출물 (git 제외)
 ```
 
-## 자료 위치 (NAS `dataset/NO2-Proxy-XCO2/`, Windows PC 공유 100.118.65.89)
+## 자료 위치 (NAS `dataset/NO2-Proxy-XCO2/` 공유 — 경로는 환경변수 `NO2_NAS_ROOT` 또는 `configs/nas_local.txt`, 견본 `configs/nas_local.example.txt`)
 
 | 디렉토리 | 내용 |
 |---|---|

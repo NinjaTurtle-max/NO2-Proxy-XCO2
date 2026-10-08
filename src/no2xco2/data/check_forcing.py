@@ -144,6 +144,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="docs/results"); ap.add_argument("--skip-era5", action="store_true"); ap.add_argument("--skip-ct", action="store_true"); ap.add_argument("--stride", type=int, default=1, help="ERA5 데이터 통계 표본 간격(h). 1=전수")
     a = ap.parse_args(); wait_nas(); t0 = time.time()
+    os.makedirs(a.out, exist_ok=True)  # 기본 docs/results 는 git 제외 → 새 클론에 없을 수 있음 (QA §30 G-3)
     if not a.skip_era5:
         e = _run_months(check_era5_month, f"{a.out}/era5_check.csv", "ERA5", t0, stride=a.stride)
         print(f"\nERA5 z100: 존재 {int(e.exists.sum())}/60 · ok {int(e.ok.fillna(False).sum())} · flag {int((e.exists & ~e.ok.fillna(False)).sum())}")

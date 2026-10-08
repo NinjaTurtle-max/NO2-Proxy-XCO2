@@ -1,12 +1,31 @@
 """경로 설정 — 하드코딩 금지 원칙. 환경변수로 덮어쓸 수 있다.
 
-NO2_NAS_ROOT : NAS 프로젝트 루트 (기본: SMB 마운트 E:/dataset/NO2-Proxy-XCO2)
+NAS_ROOT : NAS 프로젝트 루트. 결정 순서 (사용자 결정 ①, 2026-10-08 — 공개 저장소에 내부 주소를 남기지 않음):
+  ① 환경변수 NO2_NAS_ROOT ② 로컬 파일 configs/nas_local.txt 첫 줄 (git 제외, 견본 configs/nas_local.example.txt)
+  ③ 자리표시 /Volumes/NAS/dataset/NO2-Proxy-XCO2
 NO2_NAS_MOUNT : NAS 공유 루트 = "dataset" 의 상위 (기본: NAS_ROOT 에서 "/dataset/" 앞부분 — /Volumes/<호스트> 또는 PC 의 E:, 없으면 NAS_ROOT)
   — 마운트 대기(wait_nas)·로컬 판정(_LOCAL_NAS)·SMB 가드(era5.open_wind)·NAS_SRC_NC·smb URL 이 모두 이 값에서 나온다 (QA A3 2026-09-24).
 """
 import os
 
-NAS_ROOT = os.environ.get("NO2_NAS_ROOT", "/Volumes/100.118.65.89/dataset/NO2-Proxy-XCO2")
+_NAS_LOCAL_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "nas_local.txt")
+_NAS_PLACEHOLDER = "/Volumes/NAS/dataset/NO2-Proxy-XCO2"
+
+
+def _nas_root() -> str:
+    """NAS_ROOT 결정: 환경변수 NO2_NAS_ROOT → configs/nas_local.txt 첫 줄 → 자리표시 (빈 값은 다음 단계로)."""
+    env = os.environ.get("NO2_NAS_ROOT", "").strip()
+    if env:
+        return env
+    if os.path.isfile(_NAS_LOCAL_FILE):
+        with open(_NAS_LOCAL_FILE, encoding="utf-8") as f:
+            line = f.readline().strip()
+        if line:
+            return line
+    return _NAS_PLACEHOLDER
+
+
+NAS_ROOT = _nas_root()
 NAS_MOUNT = os.environ.get("NO2_NAS_MOUNT", NAS_ROOT.split("/dataset/")[0] if "/dataset/" in NAS_ROOT else NAS_ROOT)  # nas_xco2_dir·NAS_SRC_NC 가 <NAS_MOUNT>/dataset/… 를 찾으므로 "dataset" 상위 (QA K2)
 NAS_ERA5_RAW = os.path.join(NAS_ROOT, "era5_pl_raw")       # 기압면·단일면 원본 (보존)
 NAS_ERA5_WIND = os.path.join(NAS_ROOT, "era5_wind_z100")    # 파생 PBL풍 (z_min=100m)

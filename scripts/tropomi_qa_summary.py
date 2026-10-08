@@ -43,6 +43,7 @@ def main():
     outs = {k: os.path.join(a.out, f"tropomi_qa_by_{k}_{day}.csv") for k in tabs}
     if any(os.path.exists(p) for p in outs.values()):  # N-2: 같은 날 재생성은 --out 을 바꿔서
         raise FileExistsError(f"이미 있음: {[p for p in outs.values() if os.path.exists(p)]}")
+    os.makedirs(a.out, exist_ok=True)  # 기본 docs/results 는 git 제외 → 새 클론에 없을 수 있음 (QA §30 G-3)
     for k, t in tabs.items():
         t.to_csv(outs[k])
         print(f"\n## by {k}\n", t.drop(columns=BINS).to_string())

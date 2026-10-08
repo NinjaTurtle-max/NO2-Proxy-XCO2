@@ -31,3 +31,6 @@ experiments/
 # 커밋 범위 (2026-10-08 사용자 결정): 연구 문서는 로컬 전용, 설치 산출물 제외
 /docs/
 *.egg-info/
+
+# NAS 실제 경로 (로컬 전용, 사용자 결정 ① 2026-10-08 — 견본 configs/nas_local.example.txt 만 커밋)
+/configs/nas_local.txt
