@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "no2xco2"
+version = "0.1.0"
+description = "NO2-proxy XCO2 reconstruction: physics-injected spatiotemporal graph over East Asia"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 160
+target-version = "py310"
+
+[tool.ruff.lint]
+# 검수용 최소 규칙: 정의 안 된 이름·미사용 import·구문 오류(F, E9) + 흔한 버그 패턴(B). 스타일 규칙은 제외.
+select = ["F", "E9", "B"]
+ignore = ["B905", "B007", "B023"]
+exclude = ["archive", "data", "experiments", "docs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = ["slow: 30 s 이상 걸리는 스모크"]

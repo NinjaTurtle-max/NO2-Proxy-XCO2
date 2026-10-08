@@ -9,7 +9,7 @@
 
 # Directories
 archive/
-data/
+/data/
 DATA_process/
 __pycache__/
 .ipynb_checkpoints/
@@ -25,3 +25,9 @@ hall_of_fame_*.csv
 *.csv
 *.md
 !README.md
+experiments/
+.claude/.last_smoke
+
+# 커밋 범위 (2026-10-08 사용자 결정): 연구 문서는 로컬 전용, 설치 산출물 제외
+/docs/
+*.egg-info/

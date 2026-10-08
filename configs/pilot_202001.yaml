@@ -1,0 +1,10 @@
+# 파일럿 2차 (2026-09-14) 실행 설정 — 기록용. 현재 스크립트는 CLI 인자로 받음 (yaml 로더 미연결).
+month: "202001"
+grid: {lat0: 20.0, lon0: 100.0, d: 0.25, nlat: 121, nlon: 201}
+tropomi: {source: "_tropomi_ea_v2", qa_min: 0.75}
+wind: {file: "data/raw/era5_wind/era5_wind_202001_z100.nc", z_min_m: 100}
+splits: {time_block_days: 7, space_block_deg: 5, buffer_deg: 1.0, time_buffer_days: 2, K: 5, vfold: 1}
+model: {d: 8, dt_h: 1, L: 48, chunk: 48, px_frac: 0.15, D_init: 5000, k_init_per_h: 0.0417, lr: 3e-3, epochs: 30, seeds: [0, 1, 2]}
+configs: ["time:2", "space:0"]
+thresholds: {B1_margin_ppm: 0.064, B3_ppm: 0.42}
+outputs: {pilot: "experiments/pilot2_seeds", rung1: "experiments/rung1", rung3: "experiments/rung3", rung0: "experiments/rung0", tccon: "experiments/tccon"}
