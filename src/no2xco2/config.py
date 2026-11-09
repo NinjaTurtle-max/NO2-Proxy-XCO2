@@ -38,6 +38,7 @@ LOCAL_NC = "data/raw/integrated_dataset.nc"                   # 처리 중 로�
 GRID_LAT0, GRID_LON0, GRID_D = 20.0, 100.0, 0.25              # 잠재 격자 = ERA5 격자 (121×201)
 INDEX_DIR = "data/processed/index"                             # build_index 산출 (5년 인덱스)
 ERA5_SYN_DIR = "data/raw/era5_syn"                             # ERA5 기압면 파생 z850·thk (era5_syn.py)
+ERA5_WMEAN_DIR = "data/raw/era5_wmean"                         # 700–1000 hPa Δp 가중 평균풍 u_mean·v_mean (결정 11 ① D5 (가), 사용자 결정 10-27; Data 산출)
 ERA5_TCWV_DIR = "data/raw/era5_tcwv"                           # ERA5 단일면 tcwv 월 파일 (A-6, 승인 2026-10-08; scripts/fetch/era5_tcwv.py)
 SIF_DIR = "data/processed/sif"                                 # TROPOSIF 0.25° 월 격자 (A-6·C-1, Data 산출)
 

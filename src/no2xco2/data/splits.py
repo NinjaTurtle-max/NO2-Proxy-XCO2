@@ -54,6 +54,49 @@ def train_mask(df: pd.DataFrame, scheme: str, fold: int) -> np.ndarray:
     raise ValueError(scheme)
 
 
+SCENE_GAP_S = 300.0  # 장면 = 같은 위성, 직전 사운딩과 300 s 초과 간격이면 새 장면 (결정 11 ① W1, P1 정의)
+
+
+def _scene_sorted(df: pd.DataFrame, lab: np.ndarray):
+    """L_train 행을 (위성 문자열, 시각) 순으로 정렬한 표와 장면 번호. P1 `experiments/p1_revisit_20261027/split_check_20261027_pi.py` 와 같은 절차.
+    반환: (o = L_train 부분집합 안 정렬 순서, d = 정렬된 표[t, sat, time], scene = 정렬 순서의 장면 번호)."""
+    d = df.loc[lab, ["time", "satellite"]].reset_index(drop=True)
+    d["t"] = (pd.to_datetime(d.time) - T0).dt.total_seconds() / 86400.0
+    d["sat"] = d.satellite.astype(str)
+    o = np.lexsort((d.t.to_numpy(), d.sat.to_numpy())); d = d.iloc[o].reset_index(drop=True)
+    scene = (d.groupby("sat").t.diff().fillna(1e9) * 86400 > SCENE_GAP_S).cumsum().to_numpy()
+    return o, d, scene
+
+
+def scene_ids(df: pd.DataFrame, lab: np.ndarray) -> np.ndarray:
+    """행마다 장면 번호 (L_train 행만, 나머지 −1). 번호는 P1 과 같다(정렬 순 누적합)."""
+    o, _, scene = _scene_sorted(df, lab)
+    sub = np.empty(int(lab.sum()), np.int64); sub[o] = scene
+    out = np.full(len(df), -1, np.int64); out[lab] = sub
+    return out
+
+
+def scene_holdout(df: pd.DataFrame, lab: np.ndarray, seed: int = 0, f_test: float = 0.190, f_val_cum: float = 0.345):
+    """결정 11 ① 주 평가 분할 (사용자 확정 10-27, 설계표 §10.3 U3): 장면 단위 월별 층화 무작위, 버퍼 없음.
+    장면 월 = 첫 사운딩의 UTC 월. default_rng(seed) 를 1 → 12월 순으로 소비, 달마다 장면 순열 뒤 누적 사운딩 비율 ≤ f_test → test,
+    ≤ f_val_cum → val, 나머지 train. P1 split_check 와 같은 절차 (seed 0: 훈련 1,521,459 · val 357,732 · test 420,391 · test 장면 371).
+    반환: (role [len(df)] ∈ {train, val, test, none(비 L_train)}, scene_id [len(df)] (비 L_train −1))."""
+    o, d, scene = _scene_sorted(df, lab)
+    d["scene"] = scene; d["month"] = pd.to_datetime(d.time).dt.month
+    rng = np.random.default_rng(seed)
+    role = pd.Series("train", index=d.scene.unique())
+    scn = d.groupby("scene").agg(n=("t", "size"), month=("month", "first"))
+    for _, g in scn.groupby("month"):
+        ids = g.index.to_numpy()[rng.permutation(len(g))]; cum = np.cumsum(g.n.loc[ids].to_numpy()) / g.n.sum()
+        role.loc[ids[cum <= f_test]] = "test"
+        role.loc[ids[(cum > f_test) & (cum <= f_val_cum)]] = "val"
+    sub_role = np.empty(int(lab.sum()), object); sub_role[o] = role.loc[d.scene].to_numpy()
+    sub_sid = np.empty(int(lab.sum()), np.int64); sub_sid[o] = scene
+    r = np.full(len(df), "none", object); r[lab] = sub_role
+    sid = np.full(len(df), -1, np.int64); sid[lab] = sub_sid
+    return r, sid
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--month", default="202001")
