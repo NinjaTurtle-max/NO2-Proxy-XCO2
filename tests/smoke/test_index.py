@@ -23,7 +23,7 @@ def test_index_202001_counts():
     d = _idx_dir()
     hi = pq.read_table(f"{d}/trop_hi_202001.parquet", columns=["step_g", "qa"]).to_pandas()
     assert len(hi) == 6_145_013 and float(hi.qa.min()) >= 0.75 and hi.step_g.nunique() == 127
-    bg = ["bg_t2m", "bg_blh", "bg_sp"] + [c for c in ("bg_z850", "bg_thk") if c in pq.read_schema(f"{d}/oco_202001.parquet").names]  # 종관 지표 열(승인 2026-09-22)은 있으면 검사
+    bg = ["bg_t2m", "bg_blh", "bg_sp"] + [c for c in ("bg_z850", "bg_thk", "bg_tcwv", "bg_sif") if c in pq.read_schema(f"{d}/oco_202001.parquet").names]  # 있으면 유한 검사: 종관 지표 z850·thk (승인 2026-09-22) · A-6 선택 배경 tcwv·sif (승인 2026-10-08, index_add_bg 로 추가)
     oc = pq.read_table(f"{d}/oco_202001.parquet", columns=["label", "step_g", "step_h", "fold_time", "fold_space", *bg]).to_pandas()
     lab = (oc.label == "L_train").to_numpy()
     assert len(oc) == 101_620 and lab.sum() == 55_376 and (oc.step_g == oc.step_h).all()

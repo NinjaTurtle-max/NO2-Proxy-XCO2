@@ -17,22 +17,37 @@ from no2xco2.data.era5 import open_wind
 T0 = pd.Timestamp("2020-01-01")
 BG_FEATS = ["latitude", "longitude", "sin_doy", "cos_doy", "tdays", "hour", "t2m", "blh", "sp", "z850", "thk"]  # 결정 1 (2026-09-22): 연주기 sin/cos + 연속 시간(추세); 종관 z850·700–1000 두께 (승인 2026-09-22)
 N_BG = len(BG_FEATS)
+BG_EXTRA = ("tcwv", "sif")  # A-6 선택 배경 열 (사용자 승인 2026-10-08): 인덱스 bg_<이름> 열, 이 순서로 끝에 덧붙인다
 
 
-def n_bg(harmonics: int = 1) -> int:
-    """배경 입력 수: harmonics = 1 이면 BG_FEATS 11 (현행), k = 2..harmonics 마다 sin/cos(2πk·DOY/365.25) 2열 추가 (TS-1 승인 09-28)."""
-    return N_BG + 2 * (harmonics - 1)
+def parse_bg_extra(spec) -> tuple:
+    """"tcwv,sif" · ["sif", "tcwv"] · "" → BG_EXTRA 순서의 tuple (중복·미지 이름은 오류). 빈 값 = () = 현행 11변수."""
+    names = [x.strip() for x in (spec.split(",") if isinstance(spec, str) else spec) if x and x.strip()]
+    bad = sorted(set(names) - set(BG_EXTRA)); assert not bad and len(names) == len(set(names)), f"--bg-extra 이름 오류 {names} (허용 {BG_EXTRA})"
+    return tuple(e for e in BG_EXTRA if e in names)
 
 
-def bg_features(df: pd.DataFrame, harmonics: int = 1) -> np.ndarray:
-    """배경항 g 입력 [S, n_bg(harmonics)] 원값. sin/cos(2π·DOY/365.25) 로 연주기, tdays = 2020-01-01 기준 일수(연속)로 추세를 표현.
-    harmonics > 1: 고차 조화 sin/cos(2πk·DOY/365.25), k = 2..harmonics 를 끝에 덧붙인다 (열 순서 불변 → harmonics = 1 은 현행과 동일)."""
+def n_bg(harmonics: int = 1, extra: tuple = ()) -> int:
+    """배경 입력 수: harmonics = 1 이면 BG_FEATS 11 (현행), k = 2..harmonics 마다 sin/cos(2πk·DOY/365.25) 2열 추가 (TS-1 승인 09-28).
+    extra(A-6): 선택 배경 열 수만큼 추가 (bg_tcwv · bg_sif)."""
+    return N_BG + 2 * (harmonics - 1) + len(extra)
+
+
+def bg_extra_cols(extra: tuple = ()) -> list:
+    return [f"bg_{e}" for e in extra]
+
+
+def bg_features(df: pd.DataFrame, harmonics: int = 1, extra: tuple = ()) -> np.ndarray:
+    """배경항 g 입력 [S, n_bg(harmonics, extra)] 원값. sin/cos(2π·DOY/365.25) 로 연주기, tdays = 2020-01-01 기준 일수(연속)로 추세를 표현.
+    harmonics > 1: 고차 조화 sin/cos(2πk·DOY/365.25), k = 2..harmonics 를 끝에 덧붙인다 (열 순서 불변 → harmonics = 1 은 현행과 동일).
+    extra (A-6): 인덱스 bg_<이름> 열을 그 뒤에 덧붙인다 (빈 tuple = 현행과 동일)."""
     doy = df.doy.to_numpy(np.float32); ang = 2 * np.pi * doy / 365.25
     tdays = ((pd.to_datetime(df["time"]) - T0) / pd.Timedelta(days=1)).to_numpy().astype(np.float32)
     return np.column_stack([df.latitude.to_numpy(np.float32), df.longitude.to_numpy(np.float32), np.sin(ang), np.cos(ang), tdays,
                             df.hour.to_numpy(np.float32), df.bg_t2m.to_numpy(np.float32), df.bg_blh.to_numpy(np.float32), df.bg_sp.to_numpy(np.float32),
                             df.bg_z850.to_numpy(np.float32), df.bg_thk.to_numpy(np.float32)]
-                           + [f(k * ang) for k in range(2, harmonics + 1) for f in (np.sin, np.cos)]).astype(np.float32)
+                           + [f(k * ang) for k in range(2, harmonics + 1) for f in (np.sin, np.cos)]
+                           + [df[c].to_numpy(np.float32) for c in bg_extra_cols(extra)]).astype(np.float32)
 
 
 def load_no2_stats(idx_dir: str) -> dict:
@@ -83,9 +98,9 @@ def load_px(ym: str, idx_dir: str, mu: float, sd: float, dev, qa_min: float = 0.
     return px
 
 
-def load_qry(df: pd.DataFrame, dev, harmonics: int = 1) -> dict:
-    """oco 월 df → {step_h: dict(node [4S], edge [4S,3], seg [4S], n, bg_raw [S,n_bg(harmonics)], month [S], rows)}. rows = df 내 위치. month = UTC 월 0–11 (월별 β, 결정 7-a)."""
-    off = _offsets(df.w1.to_numpy(), df.w2.to_numpy(), df.w3.to_numpy()); bg = bg_features(df, harmonics)
+def load_qry(df: pd.DataFrame, dev, harmonics: int = 1, extra: tuple = ()) -> dict:
+    """oco 월 df → {step_h: dict(node [4S], edge [4S,3], seg [4S], n, bg_raw [S,n_bg(harmonics, extra)], month [S], rows)}. rows = df 내 위치. month = UTC 월 0–11 (월별 β, 결정 7-a)."""
+    off = _offsets(df.w1.to_numpy(), df.w2.to_numpy(), df.w3.to_numpy()); bg = bg_features(df, harmonics, extra)
     mon = (pd.to_datetime(df["time"]).dt.month.to_numpy() - 1).astype(np.int64)
     qry = {}
     for s, g in df.groupby("step_h", sort=True):
@@ -108,8 +123,8 @@ def load_wind(ym: str, era5_dir: str, dev):
     return U, V, U.shape[0]
 
 
-def fit_bg_scaler(dfs: list[pd.DataFrame], train_masks: list[np.ndarray], harmonics: int = 1):
-    x = np.concatenate([bg_features(d, harmonics)[m] for d, m in zip(dfs, train_masks)])
+def fit_bg_scaler(dfs: list[pd.DataFrame], train_masks: list[np.ndarray], harmonics: int = 1, extra: tuple = ()):
+    x = np.concatenate([bg_features(d, harmonics, extra)[m] for d, m in zip(dfs, train_masks)])
     return torch.tensor(x.mean(0)), torch.tensor(x.std(0) + 1e-6)
 
 

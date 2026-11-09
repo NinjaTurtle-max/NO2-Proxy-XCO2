@@ -86,7 +86,7 @@ class Model(nn.Module):
         self.gate = nn.Linear(2 * d, d); self.upd = nn.Linear(d, d)
         self.dec = EdgeAttention(d_src=d, d_edge=3, d=d)            # 노드 잠재 → 사운딩 ; 엣지: (w, dy, dx)
         self.readout = nn.Linear(d, 1); self.beta = nn.Parameter(torch.zeros(n_beta))  # n_beta = 1 (스칼라, 현행) 또는 12 (월별 β_m, 결정 7-a 승인 09-24)
-        self.g = nn.Sequential(nn.Linear(n_bg, 32), nn.GELU(), nn.Linear(32, 1))  # n_bg: 구 prep 7, train5 는 loader.n_bg(harmonics) (기본 11 = loader.N_BG, --harmonics 3 이면 15; TS-1)
+        self.g = nn.Sequential(nn.Linear(n_bg, 32), nn.GELU(), nn.Linear(32, 1))  # n_bg: 구 prep 7, train5 는 loader.n_bg(harmonics, bg_extra) (기본 11 = loader.N_BG, --harmonics 3 이면 15; TS-1 · --bg-extra 열 수만큼 추가; A-6)
 
     def inject(self, h, px):  # h [N,d]; px: dict(node [E], edge [E,3], src [E,2])
         # 채널 0 = 물리 NO2 채널: 표준화 no2_tvcd 의 4점 가중평균을 관측 노드에 직접 퇴적 (학습 가중 없음 → β 부호·단위 식별)

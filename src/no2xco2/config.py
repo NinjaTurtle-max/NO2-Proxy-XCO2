@@ -38,6 +38,8 @@ LOCAL_NC = "data/raw/integrated_dataset.nc"                   # 처리 중 로�
 GRID_LAT0, GRID_LON0, GRID_D = 20.0, 100.0, 0.25              # 잠재 격자 = ERA5 격자 (121×201)
 INDEX_DIR = "data/processed/index"                             # build_index 산출 (5년 인덱스)
 ERA5_SYN_DIR = "data/raw/era5_syn"                             # ERA5 기압면 파생 z850·thk (era5_syn.py)
+ERA5_TCWV_DIR = "data/raw/era5_tcwv"                           # ERA5 단일면 tcwv 월 파일 (A-6, 승인 2026-10-08; scripts/fetch/era5_tcwv.py)
+SIF_DIR = "data/processed/sif"                                 # TROPOSIF 0.25° 월 격자 (A-6·C-1, Data 산출)
 
 # 3-3 소규모 조달 (rung 0 대조·TCCON 외부검증·ODIAC 보충)
 NAS_TCCON = os.path.join(NAS_ROOT, "tccon_ggg2020")
@@ -53,6 +55,11 @@ _LOCAL_NAS = os.name == "nt" or not NAS_MOUNT.startswith("/Volumes/")
 def wait_nas(max_wait_s: int = 6 * 3600, poll_s: int = 60) -> None:
     """SMB 마운트가 끊긴 동안 대기. 마운트 루트가 없으면 poll_s 간격으로 재확인. 로컬 드라이브면 존재만 확인."""
     import time
+    if NAS_ROOT == _NAS_PLACEHOLDER:  # 경로 미설정 (QA §31 N6): 자리표시 마운트는 기다려도 생기지 않으므로 안내 후 즉시 중단
+        msg = f"NAS 경로 미설정 — 환경변수 NO2_NAS_ROOT 또는 configs/nas_local.txt 에 NAS 프로젝트 루트를 적으세요 (현재 자리표시 {NAS_ROOT})"
+        print(f"    {msg}", flush=True)
+        if not os.path.isdir(os.path.join(NAS_MOUNT, "dataset")):
+            raise OSError(msg)
     if _LOCAL_NAS:
         if not os.path.isdir(os.path.dirname(NAS_ROOT)):
             raise OSError(f"NAS 루트 상위 디렉토리 없음: {NAS_ROOT} (NO2_NAS_ROOT 확인)")

@@ -7,6 +7,7 @@
   이 설명은 기본 --month-order asc 학습 롤아웃과 깨끗한 평가(항상 asc) 경로다. desc·random 학습 롤아웃은 아래 진단 옵션·DR-2 참조.
 - 옵션 (기본 = 현행): --patience (결정 3-a) · --beta-mode month (월별 β_m, 결정 7-a) · --weight scene (장면 균등 손실 가중, 결정 13-a) — 승인 09-24.
   --harmonics N (배경항 g 에 2..N 차 연주기 조화 sin/cos 추가, TS-1 승인 09-28; 기본 1 = 현행 11변수).
+  --bg-extra tcwv,sif (A-6 승인 10-08: 인덱스 bg_tcwv·bg_sif 열을 g 입력 끝에 덧붙임; 기본 없음 = 현행, 새 열을 읽지도 않음).
   진단 옵션 (09-28, 순차 학습 표류 판별): --month-order desc (학습 에폭만 월 역순 12→1; 달이 비인접이라 학습 롤아웃은 매월 콜드스타트,
   깨끗한 평가는 오름차순 그대로) · --init-state PATH (저장 state 의 파라미터로 시작; Adam 모멘트는 새로 시작).
 - 순차 학습 표류 대응 (승인 09-29, docs/decision_drift_gate_2026-09-28.md):
@@ -58,20 +59,20 @@ def scene_weights(df: pd.DataFrame, tr: np.ndarray) -> np.ndarray:
     return w
 
 
-def rollout_all(model, months, dfs, slices, idx_dir, era5_dir, mu_no2, sd_no2, bg_mean, bg_std, y, tr_mask, opt, chunk, px_frac, dev, qa_min, w=None, harmonics=1, gen=None):
+def rollout_all(model, months, dfs, slices, idx_dir, era5_dir, mu_no2, sd_no2, bg_mean, bg_std, y, tr_mask, opt, chunk, px_frac, dev, qa_min, w=None, harmonics=1, gen=None, bg_extra=()):
     """전 개월 순차 롤아웃 (warm start). 반환: 전체 예측 벡터."""
     pred = np.full(len(y), np.nan); h = None; h0_prev_end = None
     for ym, df, sl in zip(months, dfs, slices):
         if h0_prev_end is not None and L.month_h0(ym) != h0_prev_end:  # 비인접 월: 공백을 1 h 로 취급하지 않고 콜드스타트 (QA T5)
             h = None
-        px = L.load_px(ym, idx_dir, mu_no2, sd_no2, dev, qa_min); qry = L.load_qry(df, dev, harmonics); L.apply_bg_scaler(qry, bg_mean, bg_std)
+        px = L.load_px(ym, idx_dir, mu_no2, sd_no2, dev, qa_min); qry = L.load_qry(df, dev, harmonics, bg_extra); L.apply_bg_scaler(qry, bg_mean, bg_std)
         U, V, T = L.load_wind(ym, era5_dir, dev); h0_prev_end = L.month_h0(ym) + T
         p, h = M.run(model, px, qry, U, V, T, y[sl], tr_mask[sl], opt, chunk=chunk, px_frac=px_frac, h0=h, return_h=True, w=None if w is None else w[sl], gen=gen)
         pred[sl] = p; del px, qry, U, V
     return pred
 
 
-def rollout_dr(model, months, dfs, slices, idx_dir, era5_dir, mu_no2, sd_no2, bg_mean, bg_std, y, tr_mask, opt, chunk, px_frac, dev, qa_min, w, harmonics, order, cache, chain):
+def rollout_dr(model, months, dfs, slices, idx_dir, era5_dir, mu_no2, sd_no2, bg_mean, bg_std, y, tr_mask, opt, chunk, px_frac, dev, qa_min, w, harmonics, order, cache, chain, bg_extra=()):
     """DR-2 롤아웃. order = 달 인덱스 순서. chain=True: 오름차순 연속(달 시작 = 같은 에폭 앞 달 끝 상태, rollout_all 과 같음),
     chain=False: 달 시작 = cache.get(i) — 가장 최근 값(이번 에폭에 앞 달이 먼저 돌았으면 이번 값); 없으면 콜드스타트.
     반환: (예측, 갱신된 캐시 {i: i 달 시작 상태})."""
@@ -82,7 +83,7 @@ def rollout_dr(model, months, dfs, slices, idx_dir, era5_dir, mu_no2, sd_no2, bg
             h0 = h if (prev_i is not None and prev_i + 1 == i and i in new) else None
         else:
             h0 = new.get(i)
-        px = L.load_px(ym, idx_dir, mu_no2, sd_no2, dev, qa_min); qry = L.load_qry(df, dev, harmonics); L.apply_bg_scaler(qry, bg_mean, bg_std)
+        px = L.load_px(ym, idx_dir, mu_no2, sd_no2, dev, qa_min); qry = L.load_qry(df, dev, harmonics, bg_extra); L.apply_bg_scaler(qry, bg_mean, bg_std)
         U, V, T = L.load_wind(ym, era5_dir, dev)
         p, h = M.run(model, px, qry, U, V, T, y[sl], tr_mask[sl], opt, chunk=chunk, px_frac=px_frac, h0=h0, return_h=True, w=None if w is None else w[sl])
         pred[sl] = p; del px, qry, U, V
@@ -116,15 +117,15 @@ class AvgOpt:
         return {k: (v / self.n).clone() for k, v in self.sum.items()}
 
 
-def fit(months, dfs, slices, idx_dir, era5_dir, stats, bg_scaler, y, mu, tr, val, te, seed, d, epochs, lr, chunk, px_frac, no_phys, dev, tag, qa_min, max_epoch_s, te_all=None, out_dir=None, patience=None, beta_mode="scalar", w=None, harmonics=1, month_order="asc", init_state=None, avg_epoch=False, avg_val="online", val_px_frac=1.0, val_px_seed=0):
+def fit(months, dfs, slices, idx_dir, era5_dir, stats, bg_scaler, y, mu, tr, val, te, seed, d, epochs, lr, chunk, px_frac, no_phys, dev, tag, qa_min, max_epoch_s, te_all=None, out_dir=None, patience=None, beta_mode="scalar", w=None, harmonics=1, month_order="asc", init_state=None, avg_epoch=False, avg_val="online", val_px_frac=1.0, val_px_seed=0, bg_extra=()):
     te_all = te if te_all is None else te_all
     assert val.sum() > 0 and te.sum() > 0 and tr.sum() > 0, f"빈 마스크: train {tr.sum()} val {val.sum()} test {te.sum()}"  # QA R2
     torch.manual_seed(seed); np.random.seed(seed)
-    model = M.Model(d, dev, n_bg=L.n_bg(harmonics), n_beta=12 if beta_mode == "month" else 1).to(dev)
+    model = M.Model(d, dev, n_bg=L.n_bg(harmonics, bg_extra), n_beta=12 if beta_mode == "month" else 1).to(dev)
     if init_state:  # 진단: 저장 state 에서 이어 학습 (구성 일치 검사)
         init_state = init_state.format(tag=tag)  # "{tag}" 자리표시 허용 → --ablation 시 물리·절제가 각자 state 에서 시작
         s0 = torch.load(init_state, weights_only=False)
-        assert s0.get("harmonics", 1) == harmonics and s0.get("n_bg") == L.n_bg(harmonics) and s0.get("beta_mode", "scalar") == beta_mode and s0.get("physics", True) == (not no_phys), f"init_state 구성 불일치: {init_state}"
+        assert s0.get("harmonics", 1) == harmonics and s0.get("bg_extra", "") == ",".join(bg_extra) and s0.get("n_bg") == L.n_bg(harmonics, bg_extra) and s0.get("beta_mode", "scalar") == beta_mode and s0.get("physics", True) == (not no_phys), f"init_state 구성 불일치: {init_state}"
         model.load_state_dict(s0["params"], strict=False)
     if no_phys: model.phys.advect = lambda h, u, v: h; model.phys.diffuse = lambda h: h
     opt = torch.optim.Adam(model.parameters(), lr); best = (np.inf, -1, None); hist = []
@@ -140,9 +141,9 @@ def fit(months, dfs, slices, idx_dir, era5_dir, stats, bg_scaler, y, mu, tr, val
             opt.reset()
         if month_order == "random":  # DR-2: 에폭 0 오름차순 연속(캐시 생성), 이후 시드 고정 순열 + 최근 캐시
             order = list(range(len(months))) if ep == 0 else [int(i) for i in np.random.default_rng(seed * 1000 + ep).permutation(len(months))]
-            pred, cache = rollout_dr(model, *args, opt, chunk, px_frac, dev, qa_min, w, harmonics, order, cache, ep == 0)
+            pred, cache = rollout_dr(model, *args, opt, chunk, px_frac, dev, qa_min, w, harmonics, order, cache, ep == 0, bg_extra=bg_extra)
         else:
-            pred = rollout_all(model, *args_train, opt, chunk, px_frac, dev, qa_min, w, harmonics)
+            pred = rollout_all(model, *args_train, opt, chunk, px_frac, dev, qa_min, w, harmonics, bg_extra=bg_extra)
         r = pred - (y - mu); rt = np.sqrt(np.nanmean(r[tr] ** 2)); rv = np.sqrt(np.nanmean(r[val] ** 2)); rte = np.sqrt(np.nanmean(r[te] ** 2))
         cand = opt.average() if (avg_epoch and opt.n > 0) else {k: v.detach().clone() for k, v in model.named_parameters()}  # 이 에폭의 저장 후보 (DR-1 = 평균)
         sel, sel_s = rv, ""
@@ -150,7 +151,7 @@ def fit(months, dfs, slices, idx_dir, era5_dir, stats, bg_scaler, y, mu, tr, val
             t2 = time.time(); mc = copy.deepcopy(model); mc.load_state_dict(cand, strict=False); mc.eval()
             g = torch.Generator().manual_seed(val_px_seed) if val_px_frac < 1.0 else None
             with torch.no_grad():
-                pv = rollout_all(mc, *args, None, chunk, val_px_frac, dev, qa_min, harmonics=harmonics, gen=g)
+                pv = rollout_all(mc, *args, None, chunk, val_px_frac, dev, qa_min, harmonics=harmonics, gen=g, bg_extra=bg_extra)
             sel = float(np.sqrt(np.nanmean((pv - (y - mu))[val] ** 2))); sel_s = f" · val_clean_sel {sel:.3f} ({time.time() - t2:.0f}s)"; del mc, pv
         el = time.time() - t1; hist.append((ep, rt, rv, rte, el))
         print(f"  [{tag}] ep {ep:2d} train {rt:.3f} val {rv:.3f} test {rte:.3f} β {model.beta.mean().item():+.3f}{'(월 평균)' if model.beta.numel() > 1 else ''} {el:.0f}s{sel_s}", flush=True)
@@ -164,8 +165,8 @@ def fit(months, dfs, slices, idx_dir, era5_dir, stats, bg_scaler, y, mu, tr, val
         raise RuntimeError(f"[{tag}] 유효한 val 에폭 없음 (epochs={epochs}, hist={len(hist)})")
     model.load_state_dict(best[2], strict=False); model.eval()
     if out_dir is not None:  # 최저 val 파라미터 저장 (계획 A-4 사후 진단용; 수치 정의 변경 아님, d = 8 에서 ≈ 23 KB 측정). physics = 절제 여부 (QA A6)
-        torch.save({"params": best[2], "tag": tag, "best_ep": best[1], "months": months, "n_bg": L.n_bg(harmonics), "harmonics": harmonics, "month_order": month_order, "avg_epoch": avg_epoch, "avg_val": avg_val, "val_px_frac": val_px_frac if avg_val == "clean" else None, "physics": not no_phys, "beta_mode": beta_mode, "weight": "none" if w is None else "scene"}, os.path.join(out_dir, f"state_{tag}.pt"))
-    with torch.no_grad(): pred = rollout_all(model, *args, None, chunk, 1.0, dev, qa_min, harmonics=harmonics)
+        torch.save({"params": best[2], "tag": tag, "best_ep": best[1], "months": months, "n_bg": L.n_bg(harmonics, bg_extra), "harmonics": harmonics, "bg_extra": ",".join(bg_extra), "month_order": month_order, "avg_epoch": avg_epoch, "avg_val": avg_val, "val_px_frac": val_px_frac if avg_val == "clean" else None, "physics": not no_phys, "beta_mode": beta_mode, "weight": "none" if w is None else "scene"}, os.path.join(out_dir, f"state_{tag}.pt"))
+    with torch.no_grad(): pred = rollout_all(model, *args, None, chunk, 1.0, dev, qa_min, harmonics=harmonics, bg_extra=bg_extra)
     r = pred - (y - mu); k = torch.exp(model.phys.logk).item(); D = model.phys.D().detach().cpu().numpy()  # 유효 D = D_cap·σ(θ_D) (승인 S1(b))
     cache_mb = sum(v.numel() * v.element_size() for v in cache.values()) / 1e6
     b = model.beta.detach().cpu().numpy(); bx = {}
@@ -177,7 +178,7 @@ def fit(months, dfs, slices, idx_dir, era5_dir, stats, bg_scaler, y, mu, tr, val
         beta = float(b[0])
     D_med, D0 = (np.nan, np.nan) if no_phys else (float(np.median(D)), float(D[0]))  # 절제: 확산 미사용 → D 는 학습 안 된 초기값이라 기록하지 않음 (QA X3). k 는 절제에서도 적용
     return dict(best_ep=best[1], val_online=best[3], val_select=best[0], val_select_kind=avg_val, val_px_frac=val_px_frac if avg_val == "clean" else np.nan, train_clean=float(np.sqrt(np.nanmean(r[tr] ** 2))), test_clean=float(np.sqrt(np.nanmean(r[te] ** 2))), test_clean_all=float(np.sqrt(np.nanmean(r[te_all] ** 2))), test_bias=float(np.nanmean(r[te])),
-                beta=beta, **bx, beta_mode=beta_mode, weight="none" if w is None else "scene", harmonics=harmonics, month_order=month_order, init_state=init_state or "", avg_epoch=avg_epoch, val_clean=float(np.sqrt(np.nanmean(r[val] ** 2))), cache_mb=cache_mb, D_med=D_med, D0=D0, inv_k_h=1 / k / 3600, epochs_run=len(hist), epochs_max=epochs, patience=patience or 0,
+                beta=beta, **bx, beta_mode=beta_mode, weight="none" if w is None else "scene", harmonics=harmonics, bg_extra=",".join(bg_extra), month_order=month_order, init_state=init_state or "", avg_epoch=avg_epoch, val_clean=float(np.sqrt(np.nanmean(r[val] ** 2))), cache_mb=cache_mb, D_med=D_med, D0=D0, inv_k_h=1 / k / 3600, epochs_run=len(hist), epochs_max=epochs, patience=patience or 0,
                 sec_per_epoch=float(np.mean([h[4] for h in hist]))), pred + mu
 
 
@@ -193,6 +194,7 @@ def main():
     ap.add_argument("--beta-mode", choices=["scalar", "month"], default="scalar", help="결정 7-a: month = 월별 β_m 12개 (기본 scalar = 현행)")
     ap.add_argument("--weight", choices=["none", "scene"], default="none", help="결정 13-a: scene = 장면(모드·시각·0.25° 셀) 균등 손실 가중 (기본 none = 현행)")
     ap.add_argument("--harmonics", type=int, default=1, help="TS-1: 배경항 g 연주기 조화 최고 차수 (1 = 현행 11변수, 3 = 2·3차 sin/cos 추가 15변수)")
+    ap.add_argument("--bg-extra", default="", help="A-6 (승인 2026-10-08): 배경 g 입력 끝에 덧붙일 인덱스 열, 쉼표 구분 tcwv·sif (기본 빈 값 = 현행 11변수, 새 열을 읽지 않음)")
     ap.add_argument("--month-order", choices=["asc", "desc", "random"], default="asc", help="학습 에폭 월 순서 (기본 asc = 현행). desc = 진단, random = DR-2 (승인 09-29). 깨끗한 평가는 항상 asc")
     ap.add_argument("--avg-val", choices=["online", "clean"], default="online", help="DR-1 선택 지표: online (현행) / clean (에폭마다 후보 가중치로 깨끗한 val 롤아웃)")
     ap.add_argument("--val-px-frac", type=float, default=1.0, help="--avg-val clean 의 화소 비율 (1 미만이면 --val-px-seed 고정)")
@@ -204,7 +206,8 @@ def main():
     ap.add_argument("--eval-months", default=None, help="테스트 RMSE 를 이 달들(쉼표)로 한정 — 학습 곡선용 고정 테스트 구간. test_clean_all 은 전체")
     a = ap.parse_args(); dev = torch.device(a.device); os.makedirs(a.out, exist_ok=True); t0 = time.time()
     months = parse_months(a.months); _st = L.load_no2_stats(a.idx_dir); stats = (float(_st["mean"]), float(_st["std"]))  # 한 번만 읽고 출처(n·months)도 summary 에 기록 (QA R10)
-    dfs = [L.load_oco(ym, a.idx_dir, columns=L.OCO_COLS + ["xco2_uncertainty"] + (["snd_operation_mode"] if a.weight == "scene" else [])) for ym in months]
+    bg_extra = L.parse_bg_extra(a.bg_extra)
+    dfs = [L.load_oco(ym, a.idx_dir, columns=L.OCO_COLS + ["xco2_uncertainty"] + (["snd_operation_mode"] if a.weight == "scene" else []) + L.bg_extra_cols(bg_extra)) for ym in months]
     n = np.cumsum([0] + [len(d) for d in dfs]); slices = [slice(int(n[i]), int(n[i + 1])) for i in range(len(dfs))]
     big = pd.concat(dfs, ignore_index=True); y = big.xco2.to_numpy(np.float64); lab = (big.label == "L_train").to_numpy()
     ym_row = np.concatenate([np.full(len(d), m) for d, m in zip(dfs, months)])
@@ -217,13 +220,13 @@ def main():
         scheme, fold = cfg.split(":"); fold = int(fold); tr, val, te = nested_masks(big, scheme, fold, lab, a.vfold); te_all = te.copy()
         if a.eval_months:
             te = te & np.isin(ym_row, a.eval_months.split(","))
-        mu = y[tr].mean(); bg_scaler = L.fit_bg_scaler(dfs, [tr[s] for s in slices], a.harmonics)
+        mu = y[tr].mean(); bg_scaler = L.fit_bg_scaler(dfs, [tr[s] for s in slices], a.harmonics, bg_extra)
         w = scene_weights(big, tr) if a.weight == "scene" else None
         print(f"\n== {scheme} fold {fold} (val = {'space' if scheme=='time' else 'time'} fold {a.vfold}): train {tr.sum():,} / val {val.sum():,} / test {te.sum():,} · μ_train {mu:.2f}", flush=True)
         for seed in [int(s) for s in a.seeds.split(",")]:
             for no_phys in ((False, True) if a.ablation else (False,)):
                 tag = f"{scheme}{fold}_s{seed}_{'nophys' if no_phys else 'phys'}"
-                r, pred = fit(months, dfs, slices, a.idx_dir, a.era5_dir, stats, bg_scaler, y, mu, tr, val, te, seed, a.d, a.epochs, a.lr, a.chunk, a.px_frac, no_phys, dev, tag, a.qa_min, a.max_epoch_s, te_all, a.out, a.patience, a.beta_mode, w, a.harmonics, a.month_order, a.init_state, a.avg_epoch, a.avg_val, a.val_px_frac, a.val_px_seed)
+                r, pred = fit(months, dfs, slices, a.idx_dir, a.era5_dir, stats, bg_scaler, y, mu, tr, val, te, seed, a.d, a.epochs, a.lr, a.chunk, a.px_frac, no_phys, dev, tag, a.qa_min, a.max_epoch_s, te_all, a.out, a.patience, a.beta_mode, w, a.harmonics, a.month_order, a.init_state, a.avg_epoch, a.avg_val, a.val_px_frac, a.val_px_seed, bg_extra)
                 r.update(scheme=scheme, fold=fold, seed=seed, physics=not no_phys, months=f"{months[0]}-{months[-1]}", no2_n=_st["n"], no2_months=_st["months"], no2_mean=_st["mean"], no2_std=_st["std"]); rows.append(r); preds[tag] = pred
                 pd.DataFrame(dict(row_idx=big.row_idx, pred=pred, xco2=y, test=te, test_all=te_all)).to_parquet(f"{a.out}/pred_{tag}.parquet", index=False)
                 print(f"  → {tag}: best ep {r['best_ep']} val_select {r['val_select']:.3f}({r['val_select_kind']}) val_online {r['val_online']:.3f} test(clean) {r['test_clean']:.3f} (전체 {r['test_clean_all']:.3f}, 편향 {r['test_bias']:+.3f}) β {r['beta']:+.3f} D0 {r['D0']:.0f} 1/k {r['inv_k_h']:.1f}h · {r['sec_per_epoch']:.0f} s/ep", flush=True)
