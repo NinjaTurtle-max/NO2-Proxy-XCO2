@@ -97,6 +97,37 @@ def scene_holdout(df: pd.DataFrame, lab: np.ndarray, seed: int = 0, f_test: floa
     return r, sid
 
 
+def upstream_lag(df: pd.DataFrame, sid: np.ndarray, up: np.ndarray, q: np.ndarray, r_km: float = 600.0) -> np.ndarray:
+    """결정 11 ① W7 시차 (P1 `split_check_20261027_pi.py` lags 와 같은 정의): 1° 칸 (floor(lat−20), floor(lon−100)) 중심 거리,
+    q 행의 (장면, 칸)마다 칸 중심이 r_km 안인 up 행 (장면, 칸) 중 다른 장면이면서 시각(장면-칸 평균)이 앞선 가장 최근 것까지 시차(일).
+    r_km = 0 이면 같은 칸만. 반환 [len(df)]: q 행 = 그 (장면, 칸) 의 시차 (직전 없음 inf), 나머지 NaN. 사운딩 비율 = q 행 단위 집계 (P1 의 n 가중과 같음)."""
+    from scipy.spatial import cKDTree
+    t = (pd.to_datetime(df["time"]) - T0).dt.total_seconds().to_numpy() / 86400.0
+    ci = np.floor(df["latitude"].to_numpy() - 20).astype(np.int64); cj = np.floor(df["longitude"].to_numpy() - 100).astype(np.int64)
+    m = up | q; cells = np.unique(np.c_[ci[m], cj[m]], axis=0); key = {(a, b): k for k, (a, b) in enumerate(map(tuple, cells))}
+    cell = np.full(len(df), -1, np.int64); cell[m] = [key[(a, b)] for a, b in zip(ci[m], cj[m])]
+    clat = np.deg2rad(20 + cells[:, 0] + 0.5); clon = np.deg2rad(100 + cells[:, 1] + 0.5)
+    xyz = np.c_[np.cos(clat) * np.cos(clon), np.cos(clat) * np.sin(clon), np.sin(clat)]; tree = cKDTree(xyz)
+    U = pd.DataFrame(dict(scene=sid[up], cell=cell[up], t=t[up])).groupby(["scene", "cell"]).t.mean().reset_index()
+    Q = pd.DataFrame(dict(scene=sid[q], cell=cell[q], t=t[q])).groupby(["scene", "cell"]).t.mean().reset_index()
+    Tb = {k: (g.sort_values("t").t.to_numpy(), g.sort_values("t").scene.to_numpy()) for k, g in U.groupby("cell")}
+    chord = 2 * np.sin(r_km / (2 * 6371.0)) + 1e-9; best = np.full(len(Q), np.inf)
+    for a, ga in Q.groupby("cell"):
+        nb = tree.query_ball_point(xyz[a], chord) if r_km > 0 else [a]
+        ta, sa = ga.t.to_numpy(), ga.scene.to_numpy(); b_ = np.full(len(ta), np.inf)
+        for b in nb:
+            if b not in Tb:
+                continue
+            tb, sb = Tb[b]; j = np.searchsorted(tb, ta, side="left") - 1
+            j = np.where((j >= 0) & (sb[np.clip(j, 0, None)] == sa), j - 1, j)  # 같은 장면이면 하나 앞 (장면-칸 1개라 한 번이면 충분)
+            b_ = np.minimum(b_, np.where(j >= 0, ta - tb[np.clip(j, 0, None)], np.inf))
+        best[ga.index.to_numpy()] = b_
+    Q["lag"] = best
+    out = np.full(len(df), np.nan)
+    out[q] = pd.DataFrame(dict(scene=sid[q], cell=cell[q])).merge(Q[["scene", "cell", "lag"]], on=["scene", "cell"], how="left").lag.to_numpy()
+    return out
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--month", default="202001")
