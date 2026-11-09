@@ -123,6 +123,60 @@ def load_wind(ym: str, era5_dir: str, dev):
     return U, V, U.shape[0]
 
 
+def load_wmean(ym: str, wmean_dir: str, era5_dir: str, dev):
+    """결정 11 ① D5 (가) XCO₂ 채널 바람: <wmean_dir>/era5_wmean_YYYYMM.nc (Data 산출, 규약 10-27) → U2, V2 [T,NLAT,NLON].
+    규약 검사 (어기면 중단): 위도 오름차순 그대로 저장(정렬하지 않음) · 격자 = open_wind 규약 · time = 같은 월 wind z100 시간축 · 값 유한."""
+    import xarray as xr
+    f = os.path.join(wmean_dir, f"era5_wmean_{ym}.nc"); fw = os.path.join(era5_dir, f"era5_wind_{ym}_z100.nc")
+    if not os.path.exists(f):
+        raise FileNotFoundError(f"평균풍 파일 없음: {f}")
+    with xr.open_dataset(f) as ds:
+        assert float(ds.lat[0]) < float(ds.lat[-1]), f"평균풍 위도 내림차순 — 규약(오름차순) 위반: {f}"
+        with open_wind(f, ym) as chk, open_wind(fw, ym) as dw:  # 격자 규약·월 길이·시작 시각 (open_wind) + wind z100 과 시간축 일치
+            assert np.array_equal(chk.time.values, dw.time.values), f"평균풍 시간축 ≠ wind z100: {f}"
+        U2 = ds["u_mean"].values; V2 = ds["v_mean"].values
+    assert np.isfinite(U2).all() and np.isfinite(V2).all(), f"평균풍 비유한 값: {f}"
+    return torch.tensor(U2, device=dev), torch.tensor(V2, device=dev)
+
+
+def xinj_table(big: pd.DataFrame, inj: np.ndarray, sid: np.ndarray, lab: np.ndarray, yc: np.ndarray, months: list[str], leak: bool = False):
+    """결정 11 ① XCO₂ 주입 표 (전 개월 이어 붙인 big 행 기준). inj = 주입 행 마스크 (D4·D8 적용은 호출자), sid = 장면 번호 (splits.scene_ids/scene_holdout),
+    yc = y − μ_train (D1). 주입 스텝 (전역 step_g):
+      leak = False (D3): 장면의 마지막 스텝 = 그 장면 L_train 행 step_g 최댓값 → 장면의 모든 디코드(≤ 마지막 스텝, 그 스텝은 디코드 → 주입) 뒤에 주입.
+      leak = True (X1-Ls): 자기 step_g (run 의 xleak 로 주입 → 디코드).
+    주입 스텝이 속한 달 = 로드된 달 중 [month_h0, month_h0 + T) 에 드는 달 (달 경계를 넘는 장면은 뒤 달에 주입). 어느 달에도 안 들면 버림(개수 기록).
+    반환: (표 [row, ym, step_h, inject_step_g, scene, val, n0..n3, w0..w3], 통계 dict)."""
+    import calendar
+    assert not (inj & ~lab).any(), "주입 행에 비 L_train 행"
+    sg = big.step_g.to_numpy(np.int64)
+    if leak:
+        istep = sg.copy()
+    else:
+        last = pd.Series(sg[lab]).groupby(sid[lab]).max(); istep = np.full(len(big), -1, np.int64); istep[lab] = last.loc[sid[lab]].to_numpy()
+    h0 = np.array([month_h0(m) for m in months], np.int64); h1 = h0 + np.array([calendar.monthrange(int(m[:4]), int(m[4:]))[1] * 24 for m in months], np.int64)
+    r = np.flatnonzero(inj); k = np.searchsorted(h0, istep[r], side="right") - 1
+    ok = (k >= 0) & (istep[r] < h1[np.clip(k, 0, None)])
+    own = np.searchsorted(h0, sg[r], side="right") - 1
+    cross = ok & (k != own)
+    tab = pd.DataFrame(dict(row=r[ok], ym=np.asarray(months)[k[ok]], step_h=(istep[r[ok]] - h0[k[ok]]).astype(np.int32), inject_step_g=istep[r[ok]],
+                            scene=sid[r[ok]], val=yc[r[ok]].astype(np.float32)))
+    for j in range(4):
+        tab[f"n{j}"] = big[f"n{j}"].to_numpy()[r[ok]]; tab[f"w{j}"] = big[f"w{j}"].to_numpy(np.float32)[r[ok]]
+    st = dict(n_inj=int(ok.sum()), n_inj_scenes=int(np.unique(sid[r[ok]]).size), n_cross_rows=int(cross.sum()), n_cross_scenes=int(np.unique(sid[r[cross]]).size),
+              n_drop_rows=int((~ok).sum()), n_drop_scenes=int(np.unique(sid[r[~ok]]).size), leak=leak)
+    return tab, st
+
+
+def month_xinj(tab: pd.DataFrame, ym: str, dev) -> dict:
+    """xinj_table → 그 달 {step_h: dict(node [4K], w [4K], val [4K])} (model.inject_x 입력). 주입 없는 달은 {}."""
+    t = tab[tab.ym == ym]; out = {}
+    for s, g in t.groupby("step_h", sort=True):
+        out[int(s)] = dict(node=torch.tensor(np.concatenate([g[f"n{j}"].to_numpy() for j in range(4)]), device=dev),
+                           w=torch.tensor(np.concatenate([g[f"w{j}"].to_numpy(np.float32) for j in range(4)]), device=dev),
+                           val=torch.tensor(np.tile(g.val.to_numpy(np.float32), 4), device=dev))
+    return out
+
+
 def fit_bg_scaler(dfs: list[pd.DataFrame], train_masks: list[np.ndarray], harmonics: int = 1, extra: tuple = ()):
     x = np.concatenate([bg_features(d, harmonics, extra)[m] for d, m in zip(dfs, train_masks)])
     return torch.tensor(x.mean(0)), torch.tensor(x.std(0) + 1e-6)
