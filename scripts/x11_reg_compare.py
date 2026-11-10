@@ -1,4 +1,4 @@
-"""W4 기본값 보존 회귀: x11 worktree 1개월 1에폭 기본 인자 런 vs 기준 런(reg6 주 · reg7 보조) — summary 열 · 값 · state 키 · params · pred.
+"""W4 기본값 보존 회귀: 1개월 1에폭 기본 인자 런 vs 기준 런(주 기준 reg7 · 보조 reg6, 11-09 주 트리 재생성판) — summary 열 · 값 · state 키 · params · pred.
 사용: x11_reg_compare.py NEW_DIR BASE_DIR [--allow-key bg_extra]  (11-09 주 트리 재생성판: 기반이 A-6 코드라 주 기준 = reg7 (예외 없음), 보조 = reg6 은 --allow-key bg_extra — 열·state 키 차이가 이 키뿐이어야 통과)."""
 import argparse
 

@@ -1,5 +1,5 @@
 """결정 11 ① 12개월 대조 (학습 없음): W1 분할 수 · row_idx 유일성 · W2 주입 사운딩·장면 수 · W7 시차 구간 자기 재현.
-실행: scripts/x11_run.sh scripts/x11_check.py [--out experiments/x11_check_20261027] (게이트: 우리 패턴 python 0 ∧ 스왑 < 80 % ∧ AC).
+실행: scripts/x11_run.sh scripts/x11_check.py [--out experiments/x11_check_20261110] (게이트: 우리 패턴 python 0 ∧ AC ∧ 덮개 열림 ∧ 스왑 < 80 % — 기준선 단계는 S-6 예외(U-5)).
 산출: <out>/x11_check.csv (항목·값·기대·판정 칸), <out>/split_scene0.parquet (row_idx · ym · scene_id · role)."""
 import argparse
 import os
@@ -13,7 +13,7 @@ from no2xco2.data import splits as S
 from no2xco2.train import nested_masks
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--out", default="experiments/x11_check_20261027"); ap.add_argument("--months", default=",".join(f"2020{m:02d}" for m in range(1, 13)))
+ap.add_argument("--out", default="experiments/x11_check_20261110"); ap.add_argument("--months", default=",".join(f"2020{m:02d}" for m in range(1, 13)))
 ap.add_argument("--seed", type=int, default=0)
 a = ap.parse_args(); os.makedirs(a.out, exist_ok=True); months = a.months.split(",")
 print(f"no2xco2.__file__={no2xco2.__file__}", flush=True)
