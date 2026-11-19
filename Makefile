@@ -45,7 +45,6 @@ figures:
 	$(PY) figures/fig2/thumbs2.py
 	$(PY) figures/fig2/thumb_target_train.py
 	$(PY) figures/fig2/tiles_final.py
-	cd figures/out/fig2 && node ../../fig2/build_fig2.js
 	$(PY) figures/fig3_maps.py
 
 check:

@@ -23,7 +23,6 @@ TROPOMI NO₂(매일)를 ERA5 경계층 바람으로 수송하는 0.25° 잠재 
 
 ```bash
 pip install -e .          # Python 3.10, 판은 pyproject.toml
-npm install pptxgenjs@4.0.1   # Fig. 2 (Node.js)
 make all                  # 저장된 모델 파일로 평가 · 지도 · 그림 (자료 준비 뒤)
 make train baselines      # 모델을 처음부터 다시 학습
 ```
@@ -47,7 +46,7 @@ make train baselines      # 모델을 처음부터 다시 학습
 | 그림 · 표 | 프로그램 | 출력 |
 |---|---|---|
 | Fig. 1 연구 영역 · 시험 칸 | `figures/region_points.py` → `figures/fig1_region.py` | `figures/out/fig1_region.png` |
-| Fig. 2 모델 구조 · 비교 설계 | `figures/fig2/thumbs.py` · `thumbs2.py` · `thumb_target_train.py` · `tiles_final.py` → `figures/fig2/build_fig2.js` (PptxGenJS) | `figures/out/fig2/fig2.pptx` (PNG 는 PowerPoint 에서 내보냄) |
+| Fig. 2 모델 구조 · 비교 설계 (그림 재료) | `figures/fig2/thumbs.py` · `thumbs2.py` · `thumb_target_train.py` · `tiles_final.py` | `figures/out/fig2/*.png` |
 | Fig. 3 사례일 지도 · 산점도 | `scripts/maps/grid_map_gnn.py` · `grid_map_baselines.py` → `figures/fig3_maps.py` | `figures/out/fig_maps_scatter.png` |
 | Table 2 네 모델 비교 | `scripts/evaluate/compare_models.py` | `runs/tables/compare_models.csv` |
 | 시험 칸별 수송 효과 | `scripts/evaluate/compare_models.py` | `runs/tables/cells_transport.csv` |
@@ -92,7 +91,7 @@ make train baselines      # 모델을 처음부터 다시 학습
 
 | 항목 | 값 |
 |---|---|
-| 소프트웨어 | Python 3.10.20 · numpy 1.24.3 · pandas 2.3.3 · pyarrow 23.0.1 · torch 2.11.0 (CPU) · xarray 2025.6.1 · netCDF4 1.7.4 · h5py 3.16.0 · scipy 1.13.1 · lightgbm 4.7.0 · matplotlib 3.10.8 · cartopy 0.25.0 · cdsapi 0.7.7 · Node.js 26 · pptxgenjs 4.0.1 (Fig. 2) |
+| 소프트웨어 | Python 3.10.20 · numpy 1.24.3 · pandas 2.3.3 · pyarrow 23.0.1 · torch 2.11.0 (CPU) · xarray 2025.6.1 · netCDF4 1.7.4 · h5py 3.16.0 · scipy 1.13.1 · lightgbm 4.7.0 · matplotlib 3.10.8 · cartopy 0.25.0 · cdsapi 0.7.7 |
 | 글꼴 | 그림을 같은 바이트로 다시 만들려면 Pretendard(Fig. 2 · 3)와 Apple SD Gothic Neo(Fig. 1 · 2 썸네일)가 필요하다 |
 | 난수 | 학습 seed 0 (torch · numpy), 달 순서 default_rng(seed·1000 + 에폭), 부트스트랩 · val 부표본 seed 0 |
 | GNN 학습 (60개월) | AWS c6a.4xlarge (16 vCPU), CPU. 수송 켬 942 s/에폭 × 57 에폭, 수송 끔 682 s/에폭 × 25 에폭. 12개월 켬 187 s/에폭 × 54 에폭 |
