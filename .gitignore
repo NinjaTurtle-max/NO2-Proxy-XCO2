@@ -1,37 +1,28 @@
-# Research Data Files (Large files)
-*.tif
-*.nc
-*.zarr/
-*.parquet
-*.joblib
-*.png
-*.pdf
-
-# Directories
-archive/
+# 자료와 산출물은 저장소에 넣지 않는다 (README "자료" · "산출물" 절)
 /data/
-DATA_process/
+/runs/*
+!/runs/gnn_m60_on/
+!/runs/gnn_m60_off/
+!/runs/gnn_m12_on/
+!/runs/kriging/
+!/runs/lgbm_no2_wind/
+!/runs/tables/
+/runs/*/*
+!/runs/gnn_*/state_*.pt
+!/runs/kriging/variogram.csv
+!/runs/lgbm_no2_wind/model_lgbm_no2wind.txt
+!/runs/tables/*.csv
+/figures/out/
+
+# 문서 · 발표 파일
+*.pdf
+*.pptx
+
+# 도구
 __pycache__/
-.ipynb_checkpoints/
-.DS_Store
-
-# PySR temporary files
-sr_*.csv
-pysr_*.csv
-hall_of_fame_*.csv
-*.log
-
-# CSV and Markdown rules
-*.csv
-*.md
-!README.md
-experiments/
-.claude/.last_smoke
-
-# 커밋 범위 (2026-10-08 사용자 결정): 연구 문서는 로컬 전용, 설치 산출물 제외
-/docs/
 *.egg-info/
-
-# NAS 실제 경로 (로컬 전용, 사용자 결정 ① 2026-10-08 — 견본 configs/nas_local.example.txt 만 커밋)
-/configs/nas_local.txt
-*.hwp
+.ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+node_modules/

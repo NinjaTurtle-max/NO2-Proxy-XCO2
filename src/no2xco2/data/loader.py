@@ -1,8 +1,8 @@
-"""5년 인덱스(build_index 산출) → 모델 입력 (D2·D3·D4 반영).
+"""인덱스(build_index 산출) → 모델 입력.
 
-- NO₂ 표준화: idx_dir/no2_stats.json 의 전 기간 μ·σ 1쌍 (D2). 월별 μ·σ(구 prep) 는 쓰지 않는다.
-- 시각: px·qry 는 월 상대 step_h 키 (ERA5 월 파일 인덱스). 전역 step_g 는 df 에 보존 (D3, 월 경계 warm start 는 run 이 h 를 넘겨 처리).
-- 배경 입력 bg_raw [S,11] = BG_FEATS (lat, lon, sin_doy, cos_doy, tdays, hour, t2m, blh, sp, z850, thk) 원값 (결정 1 + 종관 지표, 2026-09-22). 표준화는 fit_bg_scaler(훈련 행) → apply_bg_scaler(qry) 로 학습 시 수행 (D4, 누수 방지).
+- NO₂ 표준화: idx_dir/no2_stats.json 의 전 기간 μ · σ 한 쌍.
+- 시각: 화소 · 질의는 월 상대 step_h 를 키로 쓴다 (ERA5 월 파일의 시간 인덱스). 전역 step_g 는 표에 남긴다.
+- 배경 입력 [S, 11] = BG_FEATS 원값. 표준화는 훈련 행으로 fit_bg_scaler → apply_bg_scaler (누수 방지).
 """
 import json
 import os
@@ -11,47 +11,26 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import torch
-from no2xco2.config import INDEX_DIR, LOCAL_STAGE_OUT
+
+from no2xco2.config import ERA5_WIND_DIR, INDEX_DIR
 from no2xco2.data.era5 import open_wind
 
 T0 = pd.Timestamp("2020-01-01")
-BG_FEATS = ["latitude", "longitude", "sin_doy", "cos_doy", "tdays", "hour", "t2m", "blh", "sp", "z850", "thk"]  # 결정 1 (2026-09-22): 연주기 sin/cos + 연속 시간(추세); 종관 z850·700–1000 두께 (승인 2026-09-22)
+BG_FEATS = ["latitude", "longitude", "sin_doy", "cos_doy", "tdays", "hour", "t2m", "blh", "sp", "z850", "thk"]
 N_BG = len(BG_FEATS)
-BG_EXTRA = ("tcwv", "sif")  # A-6 선택 배경 열 (사용자 승인 2026-10-08): 인덱스 bg_<이름> 열, 이 순서로 끝에 덧붙인다
 
 
-def parse_bg_extra(spec) -> tuple:
-    """"tcwv,sif" · ["sif", "tcwv"] · "" → BG_EXTRA 순서의 tuple (중복·미지 이름은 오류). 빈 값 = () = 현행 11변수."""
-    names = [x.strip() for x in (spec.split(",") if isinstance(spec, str) else spec) if x and x.strip()]
-    bad = sorted(set(names) - set(BG_EXTRA)); assert not bad and len(names) == len(set(names)), f"--bg-extra 이름 오류 {names} (허용 {BG_EXTRA})"
-    return tuple(e for e in BG_EXTRA if e in names)
-
-
-def n_bg(harmonics: int = 1, extra: tuple = ()) -> int:
-    """배경 입력 수: harmonics = 1 이면 BG_FEATS 11 (현행), k = 2..harmonics 마다 sin/cos(2πk·DOY/365.25) 2열 추가 (TS-1 승인 09-28).
-    extra(A-6): 선택 배경 열 수만큼 추가 (bg_tcwv · bg_sif)."""
-    return N_BG + 2 * (harmonics - 1) + len(extra)
-
-
-def bg_extra_cols(extra: tuple = ()) -> list:
-    return [f"bg_{e}" for e in extra]
-
-
-def bg_features(df: pd.DataFrame, harmonics: int = 1, extra: tuple = ()) -> np.ndarray:
-    """배경항 g 입력 [S, n_bg(harmonics, extra)] 원값. sin/cos(2π·DOY/365.25) 로 연주기, tdays = 2020-01-01 기준 일수(연속)로 추세를 표현.
-    harmonics > 1: 고차 조화 sin/cos(2πk·DOY/365.25), k = 2..harmonics 를 끝에 덧붙인다 (열 순서 불변 → harmonics = 1 은 현행과 동일).
-    extra (A-6): 인덱스 bg_<이름> 열을 그 뒤에 덧붙인다 (빈 tuple = 현행과 동일)."""
+def bg_features(df: pd.DataFrame) -> np.ndarray:
+    """배경항 g 입력 [S, 11] 원값. sin · cos(2π·DOY/365.25) 로 연주기, tdays = 2020-01-01 기준 일수로 추세를 나타낸다."""
     doy = df.doy.to_numpy(np.float32); ang = 2 * np.pi * doy / 365.25
     tdays = ((pd.to_datetime(df["time"]) - T0) / pd.Timedelta(days=1)).to_numpy().astype(np.float32)
     return np.column_stack([df.latitude.to_numpy(np.float32), df.longitude.to_numpy(np.float32), np.sin(ang), np.cos(ang), tdays,
                             df.hour.to_numpy(np.float32), df.bg_t2m.to_numpy(np.float32), df.bg_blh.to_numpy(np.float32), df.bg_sp.to_numpy(np.float32),
-                            df.bg_z850.to_numpy(np.float32), df.bg_thk.to_numpy(np.float32)]
-                           + [f(k * ang) for k in range(2, harmonics + 1) for f in (np.sin, np.cos)]
-                           + [df[c].to_numpy(np.float32) for c in bg_extra_cols(extra)]).astype(np.float32)
+                            df.bg_z850.to_numpy(np.float32), df.bg_thk.to_numpy(np.float32)]).astype(np.float32)
 
 
 def load_no2_stats(idx_dir: str) -> dict:
-    """no2_stats.json 전체(n·mean·std·months·qa_hi) — 호출자가 mean/std 를 꺼내 쓰고 출처(n·months)를 기록한다 (QA R10)."""
+    """no2_stats.json (n · mean · std · months)."""
     with open(os.path.join(idx_dir, "no2_stats.json")) as f:
         return json.load(f)
 
@@ -65,22 +44,22 @@ OCO_COLS = ["row_idx", "time", "latitude", "longitude", "label", "xco2", "step_g
 
 
 def load_oco(ym: str, idx_dir: str, columns=OCO_COLS) -> pd.DataFrame:
-    """학습에 쓰는 열만 읽는다 (45열 전부 읽으면 5년 ≈ 11 GB)."""
+    """필요한 열만 읽는다 (전 열을 읽으면 5년 약 11 GB)."""
     return pq.read_table(os.path.join(idx_dir, f"oco_{ym}.parquet"), columns=columns).to_pandas()
 
 
 def _offsets(w1, w2, w3):
     ty = (w2 + w3).astype(np.float32); tx = (w1 + w3).astype(np.float32)
-    return [(ty, tx), (ty, tx - 1), (ty - 1, tx), (ty - 1, tx - 1)]  # 노드 k 기준 화소 오프셋(셀 단위)
+    return [(ty, tx), (ty, tx - 1), (ty - 1, tx), (ty - 1, tx - 1)]  # 노드 k 기준 관측 위치 오프셋 (셀 단위)
 
 
 def load_px(ym: str, idx_dir: str, mu: float, sd: float, dev, qa_min: float = 0.75) -> dict:
-    """trop_hi 월 파일 → {step_h: dict(node [E], edge [E,3], src [E,2])}."""
-    assert qa_min >= 0.75, "trop_hi 는 qa ≥ 0.75 만 담고 있음 — qa_min < 0.75 는 인덱스 재생성 필요"
+    """trop_hi 월 파일 → {step_h: dict(node [E], edge [E, 3], src [E, 2])}."""
+    assert qa_min >= 0.75, "trop_hi 는 qa ≥ 0.75 화소만 담고 있다"
     e = pq.read_table(os.path.join(idx_dir, f"trop_hi_{ym}.parquet")).to_pandas()
     if qa_min > 0.75:
         e = e[e.qa >= qa_min]
-    if len(e) == 0:  # 필터 후 화소 0 → 주입 없음 (빈 배열로 IndexError 나던 경로, QA X7)
+    if len(e) == 0:
         return {}
     e = e.sort_values("step_g", kind="stable").reset_index(drop=True)
     h0 = month_h0(ym); step = (e.step_g.to_numpy() - h0).astype(np.int32)
@@ -98,10 +77,9 @@ def load_px(ym: str, idx_dir: str, mu: float, sd: float, dev, qa_min: float = 0.
     return px
 
 
-def load_qry(df: pd.DataFrame, dev, harmonics: int = 1, extra: tuple = ()) -> dict:
-    """oco 월 df → {step_h: dict(node [4S], edge [4S,3], seg [4S], n, bg_raw [S,n_bg(harmonics, extra)], month [S], rows)}. rows = df 내 위치. month = UTC 월 0–11 (월별 β, 결정 7-a)."""
-    off = _offsets(df.w1.to_numpy(), df.w2.to_numpy(), df.w3.to_numpy()); bg = bg_features(df, harmonics, extra)
-    mon = (pd.to_datetime(df["time"]).dt.month.to_numpy() - 1).astype(np.int64)
+def load_qry(df: pd.DataFrame, dev) -> dict:
+    """사운딩 월 표 → {step_h: dict(node [4S], edge [4S, 3], seg [4S], n, bg_raw [S, 11], rows)}. rows = 표 안 위치."""
+    off = _offsets(df.w1.to_numpy(), df.w2.to_numpy(), df.w3.to_numpy()); bg = bg_features(df)
     qry = {}
     for s, g in df.groupby("step_h", sort=True):
         pos = df.index.get_indexer(g.index); nodes, edge = [], []
@@ -109,76 +87,21 @@ def load_qry(df: pd.DataFrame, dev, harmonics: int = 1, extra: tuple = ()) -> di
             nodes.append(g[f"n{k}"].to_numpy()); edge.append(np.stack([g[f"w{k}"].to_numpy(np.float32), off[k][0][pos], off[k][1][pos]], 1))
         S = len(g)
         qry[int(s)] = dict(node=torch.tensor(np.concatenate(nodes), device=dev), edge=torch.tensor(np.concatenate(edge), device=dev),
-                           seg=torch.tensor(np.tile(np.arange(S), 4), device=dev), n=S, bg_raw=torch.tensor(bg[pos], device=dev),
-                           month=torch.tensor(mon[pos], device=dev), rows=pos)
+                           seg=torch.tensor(np.tile(np.arange(S), 4), device=dev), n=S, bg_raw=torch.tensor(bg[pos], device=dev), rows=pos)
     return qry
 
 
 def load_wind(ym: str, era5_dir: str, dev):
     f = os.path.join(era5_dir, f"era5_wind_{ym}_z100.nc")
-    if not os.path.exists(f):  # NAS fallback 제거 (QA R5): SMB 위 HDF5 는 세그폴트 이력 → 로컬 사본(rsync) 필수
-        raise FileNotFoundError(f"ERA5 로컬 사본 없음: {f} — NAS era5_wind_z100 에서 rsync 후 실행")
-    with open_wind(f, ym) as ds:  # 위도 오름차순 보장 + 월 길이·시작 시각 검사
+    if not os.path.exists(f):
+        raise FileNotFoundError(f"ERA5 바람 파일 없음: {f}")
+    with open_wind(f, ym) as ds:  # 위도 오름차순 · 월 길이 · 시작 시각 검사
         U = torch.tensor(ds["u_pbl"].values, device=dev); V = torch.tensor(ds["v_pbl"].values, device=dev)
     return U, V, U.shape[0]
 
 
-def load_wmean(ym: str, wmean_dir: str, era5_dir: str, dev):
-    """결정 11 ① D5 (가) XCO₂ 채널 바람: <wmean_dir>/era5_wmean_YYYYMM.nc (Data 산출, 규약 10-27) → U2, V2 [T,NLAT,NLON].
-    규약 검사 (어기면 중단): 위도 오름차순 그대로 저장(정렬하지 않음) · 격자 = open_wind 규약 · time = 같은 월 wind z100 시간축 · 값 유한."""
-    import xarray as xr
-    f = os.path.join(wmean_dir, f"era5_wmean_{ym}.nc"); fw = os.path.join(era5_dir, f"era5_wind_{ym}_z100.nc")
-    if not os.path.exists(f):
-        raise FileNotFoundError(f"평균풍 파일 없음: {f}")
-    with xr.open_dataset(f) as ds:
-        assert float(ds.lat[0]) < float(ds.lat[-1]), f"평균풍 위도 내림차순 — 규약(오름차순) 위반: {f}"
-        with open_wind(f, ym) as chk, open_wind(fw, ym) as dw:  # 격자 규약·월 길이·시작 시각 (open_wind) + wind z100 과 시간축 일치
-            assert np.array_equal(chk.time.values, dw.time.values), f"평균풍 시간축 ≠ wind z100: {f}"
-        U2 = ds["u_mean"].values; V2 = ds["v_mean"].values
-    assert np.isfinite(U2).all() and np.isfinite(V2).all(), f"평균풍 비유한 값: {f}"
-    return torch.tensor(U2, device=dev), torch.tensor(V2, device=dev)
-
-
-def xinj_table(big: pd.DataFrame, inj: np.ndarray, sid: np.ndarray, lab: np.ndarray, yc: np.ndarray, months: list[str], leak: bool = False):
-    """결정 11 ① XCO₂ 주입 표 (전 개월 이어 붙인 big 행 기준). inj = 주입 행 마스크 (D4·D8 적용은 호출자), sid = 장면 번호 (splits.scene_ids/scene_holdout),
-    yc = y − μ_train (D1). 주입 스텝 (전역 step_g):
-      leak = False (D3): 장면의 마지막 스텝 = 그 장면 L_train 행 step_g 최댓값 → 장면의 모든 디코드(≤ 마지막 스텝, 그 스텝은 디코드 → 주입) 뒤에 주입.
-      leak = True (X1-Ls): 자기 step_g (run 의 xleak 로 주입 → 디코드).
-    주입 스텝이 속한 달 = 로드된 달 중 [month_h0, month_h0 + T) 에 드는 달 (달 경계를 넘는 장면은 뒤 달에 주입). 어느 달에도 안 들면 버림(개수 기록).
-    반환: (표 [row, ym, step_h, inject_step_g, scene, val, n0..n3, w0..w3], 통계 dict)."""
-    import calendar
-    assert not (inj & ~lab).any(), "주입 행에 비 L_train 행"
-    sg = big.step_g.to_numpy(np.int64)
-    if leak:
-        istep = sg.copy()
-    else:
-        last = pd.Series(sg[lab]).groupby(sid[lab]).max(); istep = np.full(len(big), -1, np.int64); istep[lab] = last.loc[sid[lab]].to_numpy()
-    h0 = np.array([month_h0(m) for m in months], np.int64); h1 = h0 + np.array([calendar.monthrange(int(m[:4]), int(m[4:]))[1] * 24 for m in months], np.int64)
-    r = np.flatnonzero(inj); k = np.searchsorted(h0, istep[r], side="right") - 1
-    ok = (k >= 0) & (istep[r] < h1[np.clip(k, 0, None)])
-    own = np.searchsorted(h0, sg[r], side="right") - 1
-    cross = ok & (k != own)
-    tab = pd.DataFrame(dict(row=r[ok], ym=np.asarray(months)[k[ok]], step_h=(istep[r[ok]] - h0[k[ok]]).astype(np.int32), inject_step_g=istep[r[ok]],
-                            scene=sid[r[ok]], val=yc[r[ok]].astype(np.float32)))
-    for j in range(4):
-        tab[f"n{j}"] = big[f"n{j}"].to_numpy()[r[ok]]; tab[f"w{j}"] = big[f"w{j}"].to_numpy(np.float32)[r[ok]]
-    st = dict(n_inj=int(ok.sum()), n_inj_scenes=int(np.unique(sid[r[ok]]).size), n_cross_rows=int(cross.sum()), n_cross_scenes=int(np.unique(sid[r[cross]]).size),
-              n_drop_rows=int((~ok).sum()), n_drop_scenes=int(np.unique(sid[r[~ok]]).size), leak=leak)
-    return tab, st
-
-
-def month_xinj(tab: pd.DataFrame, ym: str, dev) -> dict:
-    """xinj_table → 그 달 {step_h: dict(node [4K], w [4K], val [4K])} (model.inject_x 입력). 주입 없는 달은 {}."""
-    t = tab[tab.ym == ym]; out = {}
-    for s, g in t.groupby("step_h", sort=True):
-        out[int(s)] = dict(node=torch.tensor(np.concatenate([g[f"n{j}"].to_numpy() for j in range(4)]), device=dev),
-                           w=torch.tensor(np.concatenate([g[f"w{j}"].to_numpy(np.float32) for j in range(4)]), device=dev),
-                           val=torch.tensor(np.tile(g.val.to_numpy(np.float32), 4), device=dev))
-    return out
-
-
-def fit_bg_scaler(dfs: list[pd.DataFrame], train_masks: list[np.ndarray], harmonics: int = 1, extra: tuple = ()):
-    x = np.concatenate([bg_features(d, harmonics, extra)[m] for d, m in zip(dfs, train_masks)])
+def fit_bg_scaler(dfs, train_masks):
+    x = np.concatenate([bg_features(d)[m] for d, m in zip(dfs, train_masks)])
     return torch.tensor(x.mean(0)), torch.tensor(x.std(0) + 1e-6)
 
 
@@ -187,4 +110,4 @@ def apply_bg_scaler(qry: dict, mean, std) -> None:
         q["bg"] = (q["bg_raw"] - mean.to(q["bg_raw"].device)) / std.to(q["bg_raw"].device)
 
 
-DEFAULT_IDX = INDEX_DIR; DEFAULT_ERA5 = LOCAL_STAGE_OUT
+DEFAULT_IDX = INDEX_DIR; DEFAULT_ERA5 = ERA5_WIND_DIR
